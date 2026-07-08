@@ -48,12 +48,14 @@ with preserve_import_state("core.database", "src.database", "core.session_manage
     import src.endpoint_resolver as endpoint_resolver
     from routes.model_routes import (
         _probe_endpoint,
+        _probe_endpoint_with_metadata,
         _ping_endpoint,
         _probe_single_model,
         _resolve_probe_key,
         _classify_endpoint,
         _rewrite_loopback_for_docker,
         _openai_model_ids,
+        _openai_model_metadata,
         _ollama_model_names,
         _PROVIDER_CURATED,
     )
@@ -102,6 +104,38 @@ class TestModelListHelpers:
     def test_ollama_model_names(self, data, expected):
         assert _ollama_model_names(data) == expected
 
+    def test_openai_model_metadata_extracts_reasoning_efforts(self):
+        data = {
+            "data": [
+                {
+                    "id": "gemma-4-26b-a4b-it",
+                    "supported_reasoning_efforts": ["none", "low", "medium", "high"],
+                },
+                {
+                    "id": "glm-5.2",
+                    "capabilities": {"reasoning_efforts": ["medium", "high", "max"]},
+                },
+                {"id": "plain-chat"},
+            ]
+        }
+        assert _openai_model_metadata(data) == {
+            "gemma-4-26b-a4b-it": {"reasoning_efforts": ["none", "low", "medium", "high"]},
+            "glm-5.2": {"reasoning_efforts": ["medium", "high", "max"]},
+        }
+
+    def test_openai_model_metadata_drops_malformed_efforts(self):
+        data = {
+            "data": [
+                {
+                    "id": "reasoner",
+                    "reasoning": {"effort": {"enum": ["LOW", "", "../bad", "medium", "low"]}},
+                }
+            ]
+        }
+        assert _openai_model_metadata(data) == {
+            "reasoner": {"reasoning_efforts": ["low", "medium"]},
+        }
+
 
 # ── _probe_endpoint: model-list parsing ──
 
@@ -114,6 +148,30 @@ class TestProbeEndpointParsing:
                 200, json={"data": [{"id": "gpt-4o"}, {"id": "gpt-4o-mini"}]}),
         )
         assert _probe_endpoint("https://api.example.com/v1", "key") == ["gpt-4o", "gpt-4o-mini"]
+
+    def test_probe_endpoint_with_metadata_returns_reasoning_capabilities(self, monkeypatch):
+        _patch_resolve(monkeypatch)
+        monkeypatch.setattr(
+            model_routes.httpx, "get",
+            lambda url, headers=None, timeout=None, verify=None, **kwargs: _resp(
+                200,
+                json={
+                    "data": [
+                        {
+                            "id": "gemma-4-26b-a4b-it",
+                            "capabilities": {"reasoning_efforts": ["none", "low", "medium", "high"]},
+                        },
+                        {"id": "embedding-001", "capabilities": {"reasoning_efforts": ["high"]}},
+                    ]
+                },
+            ),
+        )
+        models, metadata = _probe_endpoint_with_metadata("https://api.example.com/v1", "key")
+        assert models == ["gemma-4-26b-a4b-it"]
+        assert metadata == {
+            "gemma-4-26b-a4b-it": {"reasoning_efforts": ["none", "low", "medium", "high"]},
+        }
+        assert _probe_endpoint("https://api.example.com/v1", "key") == ["gemma-4-26b-a4b-it"]
 
     def test_parses_ollama_models_format(self, monkeypatch):
         _patch_resolve(monkeypatch)

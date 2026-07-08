@@ -1,6 +1,7 @@
 from pydantic import BaseModel, Field, field_validator
 from typing import Optional, List, Dict, Any
 from datetime import datetime
+import re
 
 
 # Request Models
@@ -12,6 +13,7 @@ class ChatRequest(BaseModel):
     use_research: Optional[bool] = Field(default=False, description="Enable deep research")
     time_filter: Optional[str] = Field(default=None, description="Time filter for search")
     preset_id: Optional[str] = Field(default=None, description="Preset identifier")
+    reasoning_effort: Optional[str] = Field(default=None, max_length=32, description="Provider reasoning effort")
     
     @field_validator('message')
     @classmethod
@@ -24,6 +26,18 @@ class ChatRequest(BaseModel):
         if v is not None and v not in ['day', 'week', 'month', 'year']:
             return None  # Just set to None if invalid rather than raising error
         return v
+
+    @field_validator('reasoning_effort')
+    @classmethod
+    def validate_reasoning_effort(cls, v):
+        if v is None:
+            return None
+        effort = str(v).strip().lower()
+        if not effort:
+            return None
+        if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,31}", effort, flags=re.I):
+            raise ValueError("Invalid reasoning_effort")
+        return effort
 
 
 class SessionCreateRequest(BaseModel):

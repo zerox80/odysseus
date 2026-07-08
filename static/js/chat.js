@@ -43,6 +43,92 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
   let _sendInFlight = false;   // covers the window from click → streaming start
   let _displayOverride = null; // Override visible user bubble text (hides injected prompts)
   let _hideUserBubble = false; // Skip user bubble entirely (e.g. continue after stop)
+  const REASONING_EFFORT_KEY = 'odysseus-model-reasoning-effort';
+
+  function _loadReasoningEffortPrefs() {
+    return Storage.getJSON(REASONING_EFFORT_KEY, {});
+  }
+
+  function _saveReasoningEffort(modelId, effort) {
+    if (!modelId) return;
+    const prefs = _loadReasoningEffortPrefs();
+    if (effort) prefs[modelId] = effort;
+    else delete prefs[modelId];
+    Storage.setJSON(REASONING_EFFORT_KEY, prefs);
+  }
+
+  function _normalizeEffortList(values) {
+    if (!Array.isArray(values)) return [];
+    const seen = new Set();
+    const out = [];
+    values.forEach((raw) => {
+      const effort = String(raw || '').trim().toLowerCase();
+      if (!/^[a-z0-9][a-z0-9_-]{0,31}$/i.test(effort) || seen.has(effort)) return;
+      seen.add(effort);
+      out.push(effort);
+    });
+    return out;
+  }
+
+  function _reasoningEffortsForModel(modelId) {
+    if (!modelId || !window.modelsModule || !window.modelsModule.getCachedItems) return [];
+    const items = window.modelsModule.getCachedItems() || [];
+    for (const item of items) {
+      const ids = (item.models || []).concat(item.models_extra || []);
+      if (!ids.includes(modelId)) continue;
+      const caps = item.model_capabilities || {};
+      const meta = caps[modelId] || {};
+      return _normalizeEffortList(meta.reasoning_efforts);
+    }
+    return [];
+  }
+
+  function updateReasoningEffortControl(modelId) {
+    const select = document.getElementById('reasoning-effort-select');
+    if (!select) return;
+    const currentModel = modelId || (sessionModule.getCurrentModel ? sessionModule.getCurrentModel() : '');
+    select.dataset.modelId = currentModel || '';
+    const efforts = _reasoningEffortsForModel(currentModel);
+    if (!efforts.length) {
+      select.hidden = true;
+      select.innerHTML = '<option value="">Auto</option>';
+      return;
+    }
+    const prefs = _loadReasoningEffortPrefs();
+    const saved = efforts.includes(prefs[currentModel]) ? prefs[currentModel] : '';
+    select.innerHTML = '<option value="">Auto</option>' + efforts.map((effort) => (
+      `<option value="${effort}">${effort}</option>`
+    )).join('');
+    select.value = saved;
+    select.hidden = false;
+  }
+
+  function getReasoningEffortForSend() {
+    const select = document.getElementById('reasoning-effort-select');
+    if (!select || select.hidden) return '';
+    return String(select.value || '').trim().toLowerCase();
+  }
+
+  function _bindReasoningEffortControl() {
+    const select = document.getElementById('reasoning-effort-select');
+    if (!select || select.dataset.bound === '1') return;
+    select.dataset.bound = '1';
+    select.addEventListener('change', () => {
+      const modelId = select.dataset.modelId || (sessionModule.getCurrentModel ? sessionModule.getCurrentModel() : '');
+      _saveReasoningEffort(modelId, select.value);
+    });
+    window.addEventListener('odysseus:model-selection-changed', (e) => {
+      updateReasoningEffortControl(e.detail && e.detail.modelId);
+    });
+    window.addEventListener('odysseus:models-updated', () => updateReasoningEffortControl());
+    updateReasoningEffortControl();
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', _bindReasoningEffortControl);
+  } else {
+    _bindReasoningEffortControl();
+  }
 
   function _setForegroundChatBusy(active) {
     try {
@@ -1166,6 +1252,8 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       const fd = new FormData();
       fd.append('message', _finalMsgWithInject);
       fd.append('session', streamSessionId);
+      const reasoningEffort = getReasoningEffortForSend();
+      if (reasoningEffort) fd.append('reasoning_effort', reasoningEffort);
       if (ids.length) fd.append('attachments', JSON.stringify(ids));
       // Auto-save & send active doc ID so the backend sees latest content
       if (documentModule && activeDocIdForSend) {

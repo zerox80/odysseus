@@ -794,4 +794,7 @@ export function updateModelPicker() {
   } else {
     label.textContent = displayName;
   }
+  try {
+    window.dispatchEvent(new CustomEvent('odysseus:model-selection-changed', { detail: { modelId } }));
+  } catch (_) {}
 }

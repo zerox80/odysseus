@@ -2862,6 +2862,9 @@ body.bg-pattern-sparkles {
     .model-picker-wrap {
       position: relative;
       flex-shrink: 0;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
     }
     .model-picker-btn {
       display: inline-flex;
@@ -2895,6 +2898,23 @@ body.bg-pattern-sparkles {
     .model-picker-btn svg {
       flex-shrink: 0;
       opacity: 0.5;
+    }
+    .reasoning-effort-select {
+      height: 21px;
+      max-width: 96px;
+      padding: 0 18px 0 6px;
+      font: inherit;
+      font-size: 11px;
+      color: color-mix(in srgb, var(--fg) 72%, transparent);
+      background: color-mix(in srgb, var(--bg-elev) 84%, transparent);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      outline: none;
+    }
+    .reasoning-effort-select:hover,
+    .reasoning-effort-select:focus {
+      color: var(--fg);
+      border-color: var(--accent);
     }
     .model-picker-logo {
       display: inline-flex;

@@ -11,7 +11,7 @@ import time as _time
 import logging
 import httpx
 from datetime import datetime
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from urllib.parse import urlparse, urlunparse
 from fastapi import APIRouter, HTTPException, Form, Query, Body, Request, Response
 from pydantic import BaseModel
@@ -834,6 +834,118 @@ def _openai_model_ids(data: Any) -> List[str]:
             if isinstance(m, dict) and isinstance(m.get("id"), str) and m["id"]]
 
 
+def _openai_model_items(data: Any) -> List[Dict[str, Any]]:
+    """Return OpenAI-style model objects from standard or bare-list responses."""
+    if isinstance(data, list):
+        items = data
+    elif isinstance(data, dict):
+        items = data.get("data")
+    else:
+        items = None
+    return [m for m in (items or []) if isinstance(m, dict)]
+
+
+_REASONING_EFFORT_KEYS = (
+    "reasoning_efforts",
+    "supported_reasoning_efforts",
+    "thinking_efforts",
+    "supported_thinking_efforts",
+)
+
+
+def _normalize_reasoning_efforts(raw: Any) -> List[str]:
+    """Normalize provider-reported reasoning effort enums without hard-coding values."""
+    values: List[Any] = []
+    if isinstance(raw, str):
+        values = re.split(r"[\s,|/]+", raw.strip())
+    elif isinstance(raw, dict):
+        for key in ("enum", "values", "options", "choices"):
+            if key in raw:
+                values = raw.get(key)
+                break
+        if not isinstance(values, list):
+            values = list(raw.keys())
+    elif isinstance(raw, list):
+        values = raw
+    out: List[str] = []
+    seen = set()
+    for item in values or []:
+        effort = str(item or "").strip().lower()
+        if not effort or effort in seen:
+            continue
+        if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,31}", effort):
+            continue
+        seen.add(effort)
+        out.append(effort)
+    return out
+
+
+def _extract_reasoning_efforts_from_model(item: Dict[str, Any]) -> List[str]:
+    """Best-effort extraction of a model's provider-advertised effort enum."""
+    candidates: List[Any] = []
+    for key in _REASONING_EFFORT_KEYS:
+        if key in item:
+            candidates.append(item.get(key))
+    for block_key in ("reasoning", "thinking"):
+        block = item.get(block_key)
+        if isinstance(block, dict):
+            for key in _REASONING_EFFORT_KEYS + ("efforts", "levels", "effort", "level"):
+                if key in block:
+                    candidates.append(block.get(key))
+    for parent_key in ("capabilities", "parameters", "metadata", "extra"):
+        parent = item.get(parent_key)
+        if not isinstance(parent, dict):
+            continue
+        for key in _REASONING_EFFORT_KEYS:
+            if key in parent:
+                candidates.append(parent.get(key))
+        reasoning = parent.get("reasoning") or parent.get("thinking")
+        if isinstance(reasoning, dict):
+            for key in _REASONING_EFFORT_KEYS + ("efforts", "levels", "effort", "level"):
+                if key in reasoning:
+                    candidates.append(reasoning.get(key))
+        effort_param = parent.get("reasoning_effort") or parent.get("thinking_effort")
+        if isinstance(effort_param, dict):
+            candidates.append(effort_param)
+    for raw in candidates:
+        efforts = _normalize_reasoning_efforts(raw)
+        if efforts:
+            return efforts
+    return []
+
+
+def _openai_model_metadata(data: Any) -> Dict[str, Dict[str, Any]]:
+    """Extract capability metadata keyed by model id from OpenAI-style lists."""
+    meta: Dict[str, Dict[str, Any]] = {}
+    for item in _openai_model_items(data):
+        mid = item.get("id")
+        if not isinstance(mid, str) or not mid:
+            continue
+        efforts = _extract_reasoning_efforts_from_model(item)
+        if efforts:
+            meta[mid] = {"reasoning_efforts": efforts}
+    return meta
+
+
+def _parse_model_metadata(raw: Any) -> Dict[str, Dict[str, Any]]:
+    if raw is None:
+        return {}
+    try:
+        value = json.loads(raw) if isinstance(raw, str) else raw
+    except Exception:
+        return {}
+    if not isinstance(value, dict):
+        return {}
+    out: Dict[str, Dict[str, Any]] = {}
+    for mid, data in value.items():
+        if not isinstance(mid, str) or not isinstance(data, dict):
+            continue
+        efforts = _normalize_reasoning_efforts(data.get("reasoning_efforts"))
+        if efforts:
+            out[mid] = {"reasoning_efforts": efforts}
+    return out
+
+
 def _ollama_model_names(data: Any) -> List[str]:
     """Extract native-Ollama model names (``{"models": [{"name"|"model": ...}]}``).
 
@@ -851,9 +963,13 @@ def _ollama_model_names(data: Any) -> List[str]:
     return out
 
 
-def _probe_endpoint(base_url: str, api_key: str = None, timeout: int = 5) -> List[str]:
-    """Probe a base URL's /models endpoint and return list of model IDs.
-    For Anthropic, queries their /v1/models API, falling back to hardcoded list."""
+def _probe_endpoint_with_metadata(base_url: str, api_key: str = None, timeout: int = 5) -> Tuple[List[str], Dict[str, Dict[str, Any]]]:
+    """Probe a base URL's /models endpoint and return model IDs plus provider metadata.
+
+    Metadata is best-effort and only includes fields explicitly reported by the
+    upstream model-list response. It deliberately does not guess capability
+    values from model names.
+    """
     from src.endpoint_resolver import resolve_url
     from src.llm_core import httpx_get_kimi_aware
     base = resolve_url(_normalize_base(base_url))
@@ -861,8 +977,8 @@ def _probe_endpoint(base_url: str, api_key: str = None, timeout: int = 5) -> Lis
     if provider == "chatgpt-subscription":
         from src.chatgpt_subscription import fetch_available_models
         if api_key:
-            return fetch_available_models(api_key, timeout=timeout)
-        return []
+            return fetch_available_models(api_key, timeout=timeout), {}
+        return [], {}
     if provider == "anthropic":
         # Try Anthropic's /v1/models endpoint first
         url = _safe_build_models_url(base)
@@ -875,19 +991,21 @@ def _probe_endpoint(base_url: str, api_key: str = None, timeout: int = 5) -> Lis
             data = r.json()
             models = _openai_model_ids(data)
             if models:
-                return models
+                metadata = _openai_model_metadata(data)
+                metadata = {m: metadata[m] for m in models if m in metadata}
+                return models, metadata
         except httpx.HTTPStatusError as e:
             if api_key:
                 status = e.response.status_code if e.response is not None else "unknown"
                 logger.warning(f"Anthropic /v1/models failed with API key: HTTP {status}")
-                return []
+                return [], {}
             logger.warning(f"Anthropic /v1/models failed, using hardcoded list: {e}")
         except Exception as e:
             if api_key:
                 logger.warning(f"Anthropic /v1/models failed with API key: {e}")
-                return []
+                return [], {}
             logger.warning(f"Anthropic /v1/models failed, using hardcoded list: {e}")
-        return list(ANTHROPIC_MODELS)
+        return list(ANTHROPIC_MODELS), {}
     url = _safe_build_models_url(base)
     headers = _safe_build_headers(api_key, base)
     try:
@@ -896,9 +1014,11 @@ def _probe_endpoint(base_url: str, api_key: str = None, timeout: int = 5) -> Lis
         data = r.json()
         # OpenAI format: {"data": [{"id": "model-name"}]}
         models = _openai_model_ids(data)
+        metadata = _openai_model_metadata(data)
         # Ollama format: {"models": [{"name": "model-name"}]}
         if not models:
             models = _ollama_model_names(data)
+            metadata = {}
         if models:
             # Z.AI coding plan omits some working models from /models;
             # append curated-only entries for that endpoint only.
@@ -912,20 +1032,22 @@ def _probe_endpoint(base_url: str, api_key: str = None, timeout: int = 5) -> Lis
                 for _e in _PROVIDER_CURATED.get(_ck, []):
                     if _e not in set(models) and not any(m.startswith(_e) for m in models):
                         models.append(_e)
-            return [m for m in models if _is_chat_model(m)]
+            chat_models = [m for m in models if _is_chat_model(m)]
+            metadata = {m: metadata[m] for m in chat_models if m in metadata}
+            return chat_models, metadata
     except httpx.HTTPStatusError as e:
         if e.response is not None and _is_loading_model_response(e.response):
             logger.info("Endpoint still loading model at %s", _redact_url_for_log(url))
-            return []
+            return [], {}
         if api_key:
             status = e.response.status_code if e.response is not None else "unknown"
             logger.warning("Failed to probe %s with API key: HTTP %s", _redact_url_for_log(url), status)
-            return []
+            return [], {}
         logger.warning("Failed to probe %s: %s", _redact_url_for_log(url), e)
     except Exception as e:
         if api_key:
             logger.warning("Failed to probe %s with API key: %s", _redact_url_for_log(url), e)
-            return []
+            return [], {}
         logger.warning("Failed to probe %s: %s", _redact_url_for_log(url), e)
 
     # Older Ollama builds and some proxies expose native /api/tags even when
@@ -939,7 +1061,7 @@ def _probe_endpoint(base_url: str, api_key: str = None, timeout: int = 5) -> Lis
             data = r.json()
             models = _ollama_model_names(data)
             if models:
-                return [m for m in models if _is_chat_model(m)]
+                return [m for m in models if _is_chat_model(m)], {}
     except Exception as e:
         logger.debug(f"Ollama /api/tags probe failed for {base}: {e}")
     # Fall back to curated list if the provider has a URL-based match (e.g. z.ai has no /models endpoint)
@@ -947,8 +1069,15 @@ def _probe_endpoint(base_url: str, api_key: str = None, timeout: int = 5) -> Lis
     fallback = _PROVIDER_CURATED.get(curated_key) if curated_key else None
     if fallback:
         logger.info(f"Using curated fallback for {curated_key}: {fallback}")
-        return list(fallback)
-    return []
+        return list(fallback), {}
+    return [], {}
+
+
+def _probe_endpoint(base_url: str, api_key: str = None, timeout: int = 5) -> List[str]:
+    """Probe a base URL's /models endpoint and return list of model IDs.
+    For Anthropic, queries their /v1/models API, falling back to hardcoded list."""
+    models, _metadata = _probe_endpoint_with_metadata(base_url, api_key, timeout=timeout)
+    return models
 
 
 def _ping_endpoint(base_url: str, api_key: str = None, timeout: float = 1.5) -> Dict[str, Any]:
@@ -1334,22 +1463,27 @@ def setup_model_routes(model_discovery):
 
                     def _probe_one(key: str, data: Dict[str, Any]):
                         try:
-                            ids = _probe_endpoint(data["base"], data.get("api_key"), timeout=data.get("timeout") or 2)
-                            return key, data["endpoint_ids"], ids, None
+                            ids, metadata = _probe_endpoint_with_metadata(
+                                data["base"],
+                                data.get("api_key"),
+                                timeout=data.get("timeout") or 2,
+                            )
+                            return key, data["endpoint_ids"], ids, metadata, None
                         except Exception as e:
-                            return key, data["endpoint_ids"], None, e
+                            return key, data["endpoint_ids"], None, {}, e
 
                     if groups:
                         with ThreadPoolExecutor(max_workers=min(4, len(groups))) as pool:
                             futures = [pool.submit(_probe_one, key, data) for key, data in groups.items()]
                             for fut in as_completed(futures):
-                                key, endpoint_ids, ids, err = fut.result()
+                                key, endpoint_ids, ids, metadata, err = fut.result()
                                 st = _refresh_state.setdefault(key, {})
                                 if ids:
                                     for ep_id in endpoint_ids:
                                         ep_obj = db.query(ModelEndpoint).filter(ModelEndpoint.id == ep_id).first()
                                         if ep_obj:
                                             ep_obj.cached_models = json.dumps(ids)
+                                            ep_obj.cached_model_metadata = json.dumps(metadata or {})
                                             changed = True
                                     st["last_success"] = _time.time()
                                     st["fail_count"] = 0
@@ -1407,6 +1541,12 @@ def setup_model_routes(model_discovery):
                 ep.hidden_models,
                 getattr(ep, "pinned_models", None),
             )
+            model_metadata = _parse_model_metadata(getattr(ep, "cached_model_metadata", None))
+            visible_metadata = {
+                mid: model_metadata[mid]
+                for mid in model_ids
+                if mid in model_metadata
+            }
             # Build correct URL based on provider
             chat_url = build_chat_url(base)
             kind = _effective_endpoint_kind(ep, base)
@@ -1435,6 +1575,7 @@ def setup_model_routes(model_discovery):
                     "category": category,
                     "endpoint_kind": kind,
                     "model_type": ep_model_type,
+                    "model_capabilities": visible_metadata,
                 })
             else:
                 # Endpoint unreachable but still show it greyed out
@@ -1451,6 +1592,7 @@ def setup_model_routes(model_discovery):
                     "category": category,
                     "endpoint_kind": kind,
                     "model_type": ep_model_type,
+                    "model_capabilities": {},
                     "offline": True,
                 })
 
@@ -1711,7 +1853,7 @@ def setup_model_routes(model_discovery):
             ok_count = 0
             for ep in ep_data:
                 base = _normalize_base(ep["base_url"])
-                all_models = _probe_endpoint(base, ep.get("api_key"))
+                all_models, model_metadata = _probe_endpoint_with_metadata(base, ep.get("api_key"))
                 # Update cached_models in DB
                 if all_models:
                     db2 = SessionLocal()
@@ -1719,6 +1861,7 @@ def setup_model_routes(model_discovery):
                         ep_obj = db2.query(ModelEndpoint).filter(ModelEndpoint.id == ep["id"]).first()
                         if ep_obj:
                             ep_obj.cached_models = json.dumps(all_models)
+                            ep_obj.cached_model_metadata = json.dumps(model_metadata or {})
                             db2.commit()
                     finally:
                         db2.close()
@@ -1926,13 +2069,14 @@ def setup_model_routes(model_discovery):
                 # Explicit "require models" calls still probe; normal refresh
                 # belongs to /model-endpoints/{id}/models or /probe.
                 if require_model_list:
-                    probed_models = _probe_endpoint(
+                    probed_models, probed_metadata = _probe_endpoint_with_metadata(
                         base_url,
                         (api_key.strip() or existing.api_key or None),
                         timeout=_explicit_model_list_timeout(base_url, existing_kind_for_probe, refresh_timeout),
                     )
                     if probed_models:
                         existing.cached_models = json.dumps(probed_models)
+                        existing.cached_model_metadata = json.dumps(probed_metadata or {})
                         changed = True
                 if changed:
                     _db_dedup.commit()
@@ -1962,7 +2106,15 @@ def setup_model_routes(model_discovery):
         finally:
             _db_dedup.close()
 
-        model_ids = _probe_endpoint(base_url, api_key.strip() or None, timeout=explicit_timeout) if should_probe else []
+        model_metadata: Dict[str, Dict[str, Any]] = {}
+        if should_probe:
+            model_ids, model_metadata = _probe_endpoint_with_metadata(
+                base_url,
+                api_key.strip() or None,
+                timeout=explicit_timeout,
+            )
+        else:
+            model_ids = []
         ping = {"reachable": False, "error": None}
         if (should_probe or requested_kind in ("api", "proxy")) and not model_ids:
             ping = _ping_endpoint(base_url, api_key.strip() or None, timeout=min(explicit_timeout, 10.0))
@@ -1994,6 +2146,7 @@ def setup_model_routes(model_discovery):
                 model_refresh_interval=refresh_interval,
                 model_refresh_timeout=refresh_timeout,
                 cached_models=json.dumps(model_ids) if model_ids else None,
+                cached_model_metadata=json.dumps(model_metadata or {}) if model_ids else None,
                 pinned_models=json.dumps(_pinned) if _pinned else None,
                 supports_tools=_st,
                 owner=_owner_val,
@@ -2067,7 +2220,7 @@ def setup_model_routes(model_discovery):
         requested_kind = _normalize_endpoint_kind(endpoint_kind)
         configured_timeout = _parse_positive_int(model_refresh_timeout, minimum=1, maximum=60)
         probe_timeout = _explicit_model_list_timeout(base_url, requested_kind, configured_timeout)
-        models = _probe_endpoint(base_url, api_key.strip() or None, timeout=probe_timeout)
+        models, _model_metadata = _probe_endpoint_with_metadata(base_url, api_key.strip() or None, timeout=probe_timeout)
         ping = {"reachable": True, "error": None} if models else _ping_endpoint(base_url, api_key.strip() or None, timeout=min(probe_timeout, 10.0))
         return {
             "base_url": base_url,
@@ -2094,7 +2247,7 @@ def setup_model_routes(model_discovery):
             db.close()
 
         base = _normalize_base(ep_data["base_url"])
-        all_models = _probe_endpoint(base, ep_data["api_key"])
+        all_models, model_metadata = _probe_endpoint_with_metadata(base, ep_data["api_key"])
         chat_models = [m for m in all_models if _is_chat_model(m)]
         skipped = len(all_models) - len(chat_models)
 
@@ -2121,6 +2274,7 @@ def setup_model_routes(model_discovery):
                     ep_obj.hidden_models = json.dumps(failed) if failed else None
                     if all_models:
                         ep_obj.cached_models = json.dumps(all_models)
+                        ep_obj.cached_model_metadata = json.dumps(model_metadata or {})
                     db2.commit()
             finally:
                 db2.close()
@@ -2153,13 +2307,15 @@ def setup_model_routes(model_discovery):
                 category = _classify_endpoint(base, kind)
                 timeout = _manual_refresh_timeout(ep, category, refresh_timeout)
                 try:
-                    probed = _probe_endpoint(base, ep.api_key, timeout=timeout)
+                    probed, model_metadata = _probe_endpoint_with_metadata(base, ep.api_key, timeout=timeout)
                 except Exception as exc:
                     logger.warning("Manual model refresh failed for endpoint %s at %s: %s", ep_id, base, exc)
                     probed = []
+                    model_metadata = {}
                 if probed:
                     all_models = probed
                     ep.cached_models = json.dumps(all_models)
+                    ep.cached_model_metadata = json.dumps(model_metadata or {})
                     db.commit()
                     _invalidate_models_cache()
                     response.headers["X-Model-Refresh-Status"] = "refreshed"

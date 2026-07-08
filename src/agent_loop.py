@@ -2567,6 +2567,7 @@ async def stream_agent_loop(
     workspace: Optional[str] = None,
     forced_tools: Optional[Set[str]] = None,
     uploaded_files: Optional[List[Dict]] = None,
+    reasoning_effort: Optional[str] = None,
     workload: str = "foreground",
     _is_teacher_run: bool = False,
 ) -> AsyncGenerator[str, None]:
@@ -2681,6 +2682,7 @@ async def stream_agent_loop(
                 tools=None,
                 timeout=int(get_setting("agent_stream_timeout_seconds", 300) or 300),
                 session_id=session_id,
+                reasoning_effort=reasoning_effort,
                 workload=workload,
             ):
                 if chunk.startswith("data: ") and not chunk.startswith("data: [DONE]"):
@@ -3380,6 +3382,7 @@ async def stream_agent_loop(
             tool_choice_none=_ody_doc_finetune_mode,
             timeout=agent_stream_timeout,
             session_id=session_id,
+            reasoning_effort=reasoning_effort,
             workload=workload,
         ):
             if not _round_first_event_logged:

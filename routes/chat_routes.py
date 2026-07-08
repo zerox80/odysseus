@@ -505,6 +505,7 @@ def setup_chat_routes(
             max_tokens=ctx.preset.max_tokens,
             prompt_type=preset_id,
             session_id=session,
+            reasoning_effort=chat_request.reasoning_effort,
         )
         _clean_reply, _clean_md = clean_thinking_for_save(reply, {"model": sess.model})
         sess.add_message(ChatMessage("assistant", _clean_reply, metadata=_clean_md))
@@ -551,6 +552,10 @@ def setup_chat_routes(
         use_research = form_data.get("use_research")
         time_filter = form_data.get("time_filter")
         preset_id = form_data.get("preset_id")
+        reasoning_effort = form_data.get("reasoning_effort") or (body or {}).get("reasoning_effort")
+        reasoning_effort = str(reasoning_effort or "").strip().lower() or None
+        if reasoning_effort and not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,31}", reasoning_effort, flags=re.I):
+            raise HTTPException(400, "Invalid reasoning_effort")
         # Issue #3229: API callers send JSON, not FormData.  Read from the
         # JSON body as fallback so callers who send {"allow_bash": true}
         # actually get bash enabled.
@@ -1266,6 +1271,7 @@ def setup_chat_routes(
                         prompt_type=preset_id,
                         tools=None,
                         session_id=session,
+                        reasoning_effort=reasoning_effort,
                     ):
                         if chunk.startswith("data: ") and not chunk.startswith("data: [DONE]"):
                             try:
@@ -1433,6 +1439,7 @@ def setup_chat_routes(
                         active_document=active_doc,
                         active_email=active_email_ctx,
                         session_id=session,
+                        reasoning_effort=reasoning_effort,
                         disabled_tools=disabled_tools if disabled_tools else None,
                         tool_policy=tool_policy,
                         owner=_user,

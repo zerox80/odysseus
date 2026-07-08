@@ -202,6 +202,7 @@ export async function refreshModels(force = false) {
       if (seq < _fetchSeq) return;
       _lastFetchTime = Date.now();
       _cachedItems = data.items || [];
+      try { window.dispatchEvent(new CustomEvent('odysseus:models-updated')); } catch (_) {}
     } catch (e) {
       console.error(e);
       if (box) box.textContent = '(scan failed)';
