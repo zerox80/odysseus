@@ -44,7 +44,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
   let _displayOverride = null; // Override visible user bubble text (hides injected prompts)
   let _hideUserBubble = false; // Skip user bubble entirely (e.g. continue after stop)
   const REASONING_EFFORT_KEY = 'odysseus-model-reasoning-effort';
-  const FALLBACK_REASONING_EFFORTS = ['none', 'low', 'medium', 'high', 'max'];
+  const FALLBACK_REASONING_EFFORTS = ['none', 'low', 'medium', 'high'];
 
   function _loadReasoningEffortPrefs() {
     return Storage.getJSON(REASONING_EFFORT_KEY, {});
