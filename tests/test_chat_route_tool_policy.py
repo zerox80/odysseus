@@ -96,6 +96,19 @@ def test_disabled_tools_respects_missing_vs_explicit_toggles():
     )
 
 
+def test_explicit_web_intent_is_initialized_before_use():
+    """chat_stream must not reference _explicit_web_intent before assigning it."""
+    source = _CHAT_ROUTES.read_text(encoding="utf-8")
+    assignment_idx = source.find("_explicit_web_intent =")
+    first_use_idx = source.find("if _explicit_web_intent:")
+
+    assert assignment_idx != -1, "_explicit_web_intent must be initialized"
+    assert first_use_idx != -1, "_explicit_web_intent guard must exist"
+    assert assignment_idx < first_use_idx, (
+        "_explicit_web_intent must be assigned before disabled-tools checks"
+    )
+
+
 # ── Functional tests of the disabled-tools logic ───────────────
 
 
