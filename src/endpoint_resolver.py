@@ -240,7 +240,7 @@ def build_chat_url(base: str) -> str:
         return _append_endpoint_path(_ollama_api_root(base), "/chat")
     if provider == "chatgpt-subscription":
         return _append_endpoint_path(base, "/responses")
-    if _pathless_host(base, "api.openai.com"):
+    if _pathless_host(base, "api.openai.com") or _pathless_host(base, "api.scaleway.ai"):
         base = _append_endpoint_path(base, "/v1")
     return _append_endpoint_path(base, "/chat/completions")
 
@@ -271,7 +271,7 @@ def build_models_url(base: str) -> Optional[str]:
     parsed = urlparse(base)
     host = (parsed.hostname or "").lower()
     is_local = host in {"localhost", "127.0.0.1", "::1", "host.docker.internal"}
-    uses_v1_models_by_default = is_local or host in {"api.deepseek.com", "api.openai.com"}
+    uses_v1_models_by_default = is_local or host in {"api.deepseek.com", "api.openai.com", "api.scaleway.ai"}
     if not parsed.path and uses_v1_models_by_default:
         base = _append_endpoint_path(base, "/v1")
     return _append_endpoint_path(base, "/models")

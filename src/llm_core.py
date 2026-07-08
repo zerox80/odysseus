@@ -849,6 +849,8 @@ def _detect_provider(url: str) -> str:
         return "cerebras"
     if _host_match(url, "mistral.ai"):
         return "mistral"
+    if _host_match(url, "scaleway.ai"):
+        return "scaleway"
     return "openai"
 
 
@@ -963,6 +965,11 @@ def _provider_headers(provider: str, headers: Optional[Dict] = None) -> Dict[str
     return h
 
 
+def _supports_stream_options(provider: str) -> bool:
+    """Whether this provider accepts OpenAI's streaming usage option."""
+    return provider not in {"openrouter", "groq", "scaleway"}
+
+
 def _provider_label(url: str) -> str:
     """Human-friendly provider name for error messages."""
     if not url:
@@ -982,6 +989,7 @@ def _provider_label(url: str) -> str:
     if _host_match(url, "cerebras.ai"):
         return "cerebras"
     if _host_match(url, "mistral.ai"): return "Mistral"
+    if _host_match(url, "scaleway.ai"): return "Scaleway"
     if _host_match(url, "deepseek.com"): return "DeepSeek"
     if _host_match(url, "nvidia.com"): return "NVIDIA"
     if _host_match(url, "googleapis.com"): return "Google"
@@ -2153,7 +2161,7 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
         }
         if _omit_temperature(provider, model):
             payload.pop("temperature", None)
-        if provider not in {"openrouter", "groq"}:
+        if _supports_stream_options(provider):
             payload["stream_options"] = {"include_usage": True}
         if max_tokens and max_tokens > 0:
             tok_key = "max_completion_tokens" if _uses_max_completion_tokens(model) else "max_tokens"

@@ -37,6 +37,8 @@ class TestDetectProvider:
         ("https://openrouter.ai/api/v1", "openrouter"),
         ("https://api.groq.com/openai/v1", "groq"),
         ("https://integrate.api.nvidia.com/v1", "nvidia"),
+        ("https://api.scaleway.ai/e648912f-6565-4288-ab24-3f373b914f89/v1", "scaleway"),
+        ("https://api.scaleway.ai/v1", "scaleway"),
         ("http://localhost:11434/api", "ollama"),
         ("https://ollama.com", "ollama"),
         # xAI, DeepSeek and Gemini's OpenAI-compatible surface are NOT
@@ -82,6 +84,7 @@ class TestProviderLabel:
         ("https://openrouter.ai/api/v1", "OpenRouter"),
         ("https://api.groq.com/openai/v1", "Groq"),
         ("https://integrate.api.nvidia.com/v1", "NVIDIA"),
+        ("https://api.scaleway.ai/e648912f-6565-4288-ab24-3f373b914f89/v1", "Scaleway"),
         ("https://api.mistral.ai/v1", "Mistral"),
         ("https://api.deepseek.com", "DeepSeek"),
         ("https://generativelanguage.googleapis.com/v1beta/openai", "Google"),

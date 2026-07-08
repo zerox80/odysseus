@@ -50,6 +50,12 @@ PROVIDER_CASES = [
     ("deepseek", "https://api.deepseek.com",
      "https://api.deepseek.com/chat/completions",
      "https://api.deepseek.com/v1/models"),
+    ("scaleway", "https://api.scaleway.ai/e648912f-6565-4288-ab24-3f373b914f89/v1",
+     "https://api.scaleway.ai/e648912f-6565-4288-ab24-3f373b914f89/v1/chat/completions",
+     "https://api.scaleway.ai/e648912f-6565-4288-ab24-3f373b914f89/v1/models"),
+    ("scaleway_pathless", "https://api.scaleway.ai",
+     "https://api.scaleway.ai/v1/chat/completions",
+     "https://api.scaleway.ai/v1/models"),
     # Gemini's OpenAI-compatible surface — treated as a generic OpenAI endpoint.
     ("gemini_openai", "https://generativelanguage.googleapis.com/v1beta/openai",
      "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",

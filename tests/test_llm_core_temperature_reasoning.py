@@ -86,6 +86,11 @@ def test_normal_model_payload_keeps_temperature_above_one(monkeypatch):
     assert payload["temperature"] == 1.2
 
 
+def test_scaleway_does_not_receive_stream_options():
+    assert llm_core._supports_stream_options("scaleway") is False
+    assert llm_core._supports_stream_options("openai") is True
+
+
 def test_local_minimax_mlx_payload_gets_stability_defaults(monkeypatch):
     import src.model_context as model_context
 
