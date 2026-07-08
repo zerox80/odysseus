@@ -9,6 +9,10 @@ export const CORPUS = [
   ['atx headings', '# Title\n\nIntro line.\n\n## Section\n\nBody text.'],
   ['setext heading', 'The Title\n=========\n\nA paragraph under it.'],
   ['inline formatting', 'Some **bold**, *italic*, `code`, and a [link](https://x.com).'],
+  [
+    'inline formatting preserves prose spacing',
+    '**Kosten:** Gemma 4 ist massiv guenstiger. Die Kosten fuer Input-Token liegen bei ca. 0.06/M, waehrend Mistral bei etwa 1.50/M liegt (das ist etwa der 25-fache Unterschied).',
+  ],
   ['tight unordered list', '- one\n- two\n- three\n\ndone'],
   ['ordered list then text', 'Before\n\n1. first\n2. second\n3. third\n\nAfter'],
   ['loose list then paragraph', '- a\n\n- b\n\n- c\n\nClosing paragraph.'],
