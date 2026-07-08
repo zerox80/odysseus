@@ -44,6 +44,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
   let _displayOverride = null; // Override visible user bubble text (hides injected prompts)
   let _hideUserBubble = false; // Skip user bubble entirely (e.g. continue after stop)
   const REASONING_EFFORT_KEY = 'odysseus-model-reasoning-effort';
+  const FALLBACK_REASONING_EFFORTS = ['none', 'low', 'medium', 'high', 'max'];
 
   function _loadReasoningEffortPrefs() {
     return Storage.getJSON(REASONING_EFFORT_KEY, {});
@@ -70,17 +71,27 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
     return out;
   }
 
-  function _reasoningEffortsForModel(modelId) {
-    if (!modelId || !window.modelsModule || !window.modelsModule.getCachedItems) return [];
+  function _reasoningEffortInfoForModel(modelId) {
+    if (!modelId || !window.modelsModule || !window.modelsModule.getCachedItems) {
+      return { efforts: [], known: false, item: null };
+    }
     const items = window.modelsModule.getCachedItems() || [];
     for (const item of items) {
       const ids = (item.models || []).concat(item.models_extra || []);
       if (!ids.includes(modelId)) continue;
       const caps = item.model_capabilities || {};
       const meta = caps[modelId] || {};
-      return _normalizeEffortList(meta.reasoning_efforts);
+      const efforts = _normalizeEffortList(meta.reasoning_efforts);
+      return { efforts, known: efforts.length > 0, item };
     }
-    return [];
+    return { efforts: [], known: false, item: null };
+  }
+
+  function _shouldShowReasoningFallback(modelId, item) {
+    if (!modelId || !item || item.offline) return false;
+    const kind = String(item.endpoint_kind || '').toLowerCase();
+    if (kind === 'anthropic' || kind === 'ollama' || kind === 'chatgpt-subscription') return false;
+    return item.host === 'custom' || !!item.endpoint_id || /^https?:\/\//i.test(String(item.url || ''));
   }
 
   function updateReasoningEffortControl(modelId) {
@@ -88,8 +99,9 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
     if (!select) return;
     const currentModel = modelId || (sessionModule.getCurrentModel ? sessionModule.getCurrentModel() : '');
     select.dataset.modelId = currentModel || '';
-    const efforts = _reasoningEffortsForModel(currentModel);
-    if (!efforts.length) {
+    const info = _reasoningEffortInfoForModel(currentModel);
+    const efforts = info.known ? info.efforts : FALLBACK_REASONING_EFFORTS;
+    if (!efforts.length || (!info.known && !_shouldShowReasoningFallback(currentModel, info.item))) {
       select.hidden = true;
       select.innerHTML = '<option value="">Auto</option>';
       return;
@@ -100,6 +112,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       `<option value="${effort}">${effort}</option>`
     )).join('');
     select.value = saved;
+    select.title = info.known ? 'Thinking effort' : 'Thinking effort (provider did not list supported values)';
     select.hidden = false;
   }
 
