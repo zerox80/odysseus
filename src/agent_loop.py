@@ -116,6 +116,7 @@ _AGENT_RULES = """\
 - Multiple tool blocks per response OK. 60s timeout per tool, 10K char output limit.
 - Code/content >15 lines → ```create_document (NOT in chat). Short snippets OK in chat.
 - Long-form or structured writing is a document by default when the user asks to write/create/make/generate it and the answer would be more than a short paragraph. Use create_document instead of dumping the full content in chat.
+- Word/DOCX requests are editor documents by default: create/update the document with `create_document`/`update_document` in `markdown` and let the user export it with "Export as Word". Do NOT use shell, Python, `write_file`, `/app/data`, or `python-docx` unless the user explicitly asks for a real server-side `.docx` file at a disk path.
 - Editing an existing document: ALWAYS use ```edit_document with FIND/REPLACE blocks. Do NOT rewrite the whole document with ```update_document unless genuinely changing more than half of it.
 - BIAS TOWARD ACTION on edit requests. If the user says "edit out X", "remove the Y paragraph", "change Z" — JUST DO IT with your best interpretation. Don't ask for clarification on minor ambiguity. The user can undo or re-prompt if wrong.
 - AFTER A TOOL SUCCEEDS, do not second-guess. The success message ("Document edited: v2, 1 edit") means it worked. Reply in ONE short sentence confirming what was done. No re-checking, no replaying the diff in your head, no validation theater.
@@ -164,6 +165,7 @@ _API_AGENT_RULES = """\
 - Keep answers concise unless the user asks for depth.
 - For long code or content, use document tools instead of pasting large blocks into chat.
 - Long-form or structured writing is a document by default when the user asks to write/create/make/generate it and the answer would be more than a short paragraph. Call create_document instead of dumping the full content in chat.
+- Word/DOCX requests are editor documents by default: create/update the document with `create_document`/`update_document` in `markdown` and let the user export it with "Export as Word". Do NOT call shell, Python, `write_file`, `/app/data`, or `python-docx` unless the user explicitly asks for a real server-side `.docx` file at a disk path.
 - Editing an existing document: ALWAYS use `edit_document` with find/replace. Only use `update_document` for genuine full rewrites (>50% changed) — do NOT echo the entire file back for small edits.
 - If the active editor document is an email draft/compose window, treat that open email as the target for "write this", "write the email", "reply with...", "make it say...", "draft this", and similar requests. Do NOT create another document, search/list/manage documents, or open a different reply unless the user explicitly asks. Edit the open email draft with `edit_document` or `update_document`; preserve To/Cc/Bcc/Subject/In-Reply-To/References/X-* header lines unless the user asks to change them.
 - "Give suggestions / feedback / review / how can I improve this / what would make it better" about the OPEN document → call `suggest_document`, do NOT write a prose list of ideas in chat. It creates inline accept/reject bubbles on the doc. Give concrete `find`/`replace`/`reason` items. To suggest an ADDITION (e.g. "add a bow to the SVG", a new section), set `find` to a short existing anchor snippet and `replace` to that same snippet PLUS the new content. Only answer in prose when no document is open, or the request is purely conceptual with no concrete change to propose.
@@ -268,6 +270,7 @@ _DOMAIN_RULES = {
     "documents": """\
 ## Document rules
 - For long code/content (>15 lines), use `create_document` instead of pasting into chat.
+- Word/DOCX requests are editor documents by default: use `create_document`/`update_document` with language `markdown`; the UI can export the document with "Export as Word". Only create a real `.docx` on disk when the user explicitly gives a server-side path or asks for a disk file.
 - If an active document is open, "fix this", "add X", "change Y", etc. usually refers to that document.
 - Use `edit_document` for targeted changes. Use `update_document` only for genuine full rewrites.
 - For feedback/review/suggestions on an open document, use `suggest_document`.""",
@@ -1027,6 +1030,8 @@ def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, o
         r"\b(?:code|script|program|game|function|class|module|app)\b",
     )
     if has(r"\b(documents?|docs?|draft|compose|poem|story|essay|outline|letter|edit|rewrite|proofread|suggest|feedback|review this|make a file)\b"):
+        domains.add("documents")
+    if has(r"\b(?:word|docx|\.docx|doc\s*x|office document)\b"):
         domains.add("documents")
     if "notes_calendar_tasks" not in domains and has(r"\bwrite\b"):
         domains.add("documents")

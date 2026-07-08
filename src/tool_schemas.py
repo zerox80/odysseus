@@ -201,7 +201,7 @@ FUNCTION_TOOL_SCHEMAS = [
                 "type": "object",
                 "properties": {
                     "title": {"type": "string", "description": "Document title"},
-                    "language": {"type": "string", "description": "Programming language or format (e.g. python, javascript, markdown, text)"},
+                    "language": {"type": "string", "description": "Programming language or format (e.g. python, javascript, markdown, text). For Word/DOCX-style document requests, use markdown; the editor can export it with Export as Word."},
                     "content": {"type": "string", "description": "The document content"}
                 },
                 "required": ["title", "content"]

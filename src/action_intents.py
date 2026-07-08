@@ -86,6 +86,11 @@ _ROUTING_PATTERNS: tuple[tuple[str, str, Pattern[str]], ...] = tuple(
         ("email", "check inbox request", r"\bcheck\s+(?:my\s+)?(?:email|inbox|mail)\b"),
         ("email", "unread email request", r"\bunread\s+(?:email|mail)s?\b"),
 
+        # Document creation/editing. Word/DOCX requests should use the
+        # editor-document tools first; the browser can export those as Word.
+        ("documents", "word/docx document request", rf"{_PLEASE}(?:create|make|write|generate|draft|build)\b.{{0,120}}\b(?:word|docx|\.docx|office\s+document)\b"),
+        ("documents", "word/docx document request", rf"\b(?:word|docx|\.docx|office\s+document)\b.{{0,120}}\b(?:document|file|export)\b"),
+
         # UI/control-plane actions that should open panels or flip toggles.
         ("ui", "open/show panel request", rf"{_PLEASE}(?:open|show|bring\s+up)\s+(?:me\s+)?(?:my\s+|the\s+)?{_PANEL}\b"),
         ("ui", "tool or feature toggle request", r"\b(?:disable|enable|turn\s+(?:on|off))\s+(?:the\s+)?(?:shell|search|web|browser|documents?|memory|skills|images?|calendar|email|mail|research|incognito)\b"),
