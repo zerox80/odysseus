@@ -12,7 +12,7 @@ These hints are deterministic string matching — no embeddings — so we can te
 `get_tools_for_query` directly with retrieval stubbed out (no ChromaDB needed).
 """
 
-from src.tool_index import ToolIndex, ALWAYS_AVAILABLE
+from src.tool_index import ToolIndex, ALWAYS_AVAILABLE, BUILTIN_TOOL_DESCRIPTIONS
 
 _EMAIL_TOOLS = {
     "list_emails", "read_email", "send_email", "reply_to_email",
@@ -46,6 +46,13 @@ def test_explicit_web_search_query_gets_web_tools_without_retrieval():
     ti = _index_without_embeddings()
     tools = ti.get_tools_for_query("use web search and find a recipe for chocolate chip cookies")
     assert "web_search" in tools and "web_fetch" in tools
+
+
+def test_web_search_description_mentions_uncertain_or_stale_claims():
+    description = BUILTIN_TOOL_DESCRIPTIONS["web_search"]
+
+    assert "stale or uncertain" in description
+    assert "source-specific docs" in description
 
 
 def test_genuine_email_query_still_gets_email_tools():

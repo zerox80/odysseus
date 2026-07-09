@@ -39,7 +39,9 @@ try:
         _classify_agent_request,
         _compute_final_metrics,
         _append_tool_results,
+        _assemble_prompt,
         _insert_before_latest_user,
+        _minimal_odysseus_general_messages,
         _MCP_KEYWORDS,
     )
     _IMPORTED_AGENT_LOOP = sys.modules.get("src.agent_loop")
@@ -62,6 +64,36 @@ def test_import_stubs_do_not_leak_into_later_tests():
 
 def test_mcp_keyword_gate_matches_literal_mcp_requests():
     assert "mcp" in _MCP_KEYWORDS
+
+
+def test_agent_prompt_defaults_to_substantial_answers_and_uncertainty_search():
+    prompt = _assemble_prompt({"web_search", "web_fetch"}, compact=False)
+
+    assert "Default to substantial, useful answers" in prompt
+    assert "whenever you are not highly confident" in prompt
+    assert "Do not guess stale facts" in prompt
+    assert "Use this for current/latest/news/prices/schedules/laws/product specs/software docs" in prompt
+    assert "Keep answers concise" not in prompt
+
+
+def test_api_agent_prompt_keeps_same_answer_and_search_defaults():
+    prompt = _assemble_prompt({"web_search", "web_fetch"}, compact=True)
+
+    assert "Default to substantial, useful answers" in prompt
+    assert "whenever you are not highly confident" in prompt
+    assert "Do not guess stale facts" in prompt
+    assert "Keep answers concise" not in prompt
+
+
+def test_minimal_general_prompt_no_longer_forces_brief_answers():
+    prompt_messages = _minimal_odysseus_general_messages([
+        {"role": "user", "content": "Explain how solar panels work"},
+    ])
+
+    system = prompt_messages[0]["content"]
+    assert "substantial, useful detail" in system
+    assert "be brief only for simple acknowledgements" in system
+    assert "Answer directly and briefly" not in system
 
 
 def test_polish_internet_search_request_classifies_as_web():
