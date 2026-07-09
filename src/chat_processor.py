@@ -9,6 +9,7 @@ from src.chat_helpers import extract_urls
 from src.youtube_handler import is_youtube_url
 from src.search import comprehensive_web_search, fetch_webpage_content
 from src.prompt_security import UNTRUSTED_CONTEXT_POLICY, untrusted_context_message
+from src.prompt_policy import ODYSSEUS_CORE_PROMPT
 
 logger = logging.getLogger(__name__)
 
@@ -231,7 +232,17 @@ class ChatProcessor:
         preface = []
         rag_sources = []
 
-        # Add preset system prompt if specified
+        # The agent includes the same core in its tool prompt. Plain chat needs
+        # it here so it has a stable Odysseus baseline without duplicating the
+        # static prefix in agent mode.
+        if not agent_mode:
+            preface.append({
+                "role": "system",
+                "content": ODYSSEUS_CORE_PROMPT,
+            })
+
+        # A preset may refine the role, while the fixed core and prompt-safety
+        # policy remain separate system instructions.
         if preset_system_prompt:
             preface.append({
                 "role": "system",

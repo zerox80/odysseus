@@ -1,6 +1,39 @@
 from unittest.mock import MagicMock
 from types import SimpleNamespace
 from src.chat_processor import ChatProcessor
+from src.prompt_policy import ODYSSEUS_CORE_PROMPT
+
+
+def test_plain_chat_preface_has_stable_odysseus_response_policy():
+    processor = ChatProcessor(memory_manager=MagicMock(), personal_docs_manager=MagicMock())
+
+    preface, _, _ = processor.build_context_preface(
+        message="Hello",
+        session=None,
+        use_rag=False,
+        use_memory=False,
+        use_skills=False,
+        agent_mode=False,
+    )
+
+    assert preface[0] == {"role": "system", "content": ODYSSEUS_CORE_PROMPT}
+    assert "Prompt-safety policy" in preface[1]["content"]
+
+
+def test_agent_preface_does_not_duplicate_agent_response_policy():
+    processor = ChatProcessor(memory_manager=MagicMock(), personal_docs_manager=MagicMock())
+
+    preface, _, _ = processor.build_context_preface(
+        message="Hello",
+        session=None,
+        use_rag=False,
+        use_memory=False,
+        use_skills=False,
+        agent_mode=True,
+    )
+
+    assert all(item["content"] != ODYSSEUS_CORE_PROMPT for item in preface)
+    assert "Prompt-safety policy" in preface[0]["content"]
 
 def test_build_context_preface_web_search_success(monkeypatch):
     """Test that LLM correctly extracts and uses a web search query."""

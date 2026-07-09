@@ -66,34 +66,38 @@ def test_mcp_keyword_gate_matches_literal_mcp_requests():
     assert "mcp" in _MCP_KEYWORDS
 
 
-def test_agent_prompt_defaults_to_substantial_answers_and_uncertainty_search():
+def test_agent_prompt_uses_shared_response_policy_and_uncertainty_search():
     prompt = _assemble_prompt({"web_search", "web_fetch"}, compact=False)
 
-    assert "Default to substantial, useful answers" in prompt
+    assert "## Odysseus response policy" in prompt
+    assert "Match the user's language and requested depth" in prompt
+    assert "Do not invent facts, sources, actions, or tool results" in prompt
     assert "whenever you are not highly confident" in prompt
     assert "Do not guess stale facts" in prompt
     assert "Use this for current/latest/news/prices/schedules/laws/product specs/software docs" in prompt
-    assert "Keep answers concise" not in prompt
+    assert "Default to substantial, useful answers" not in prompt
 
 
-def test_api_agent_prompt_keeps_same_answer_and_search_defaults():
+def test_api_agent_prompt_uses_shared_response_policy_and_native_tools():
     prompt = _assemble_prompt({"web_search", "web_fetch"}, compact=True)
 
-    assert "Default to substantial, useful answers" in prompt
+    assert "## Odysseus response policy" in prompt
+    assert "Match the user's language and requested depth" in prompt
+    assert "## Native tool calling" in prompt
     assert "whenever you are not highly confident" in prompt
     assert "Do not guess stale facts" in prompt
-    assert "Keep answers concise" not in prompt
+    assert "Default to substantial, useful answers" not in prompt
 
 
-def test_minimal_general_prompt_no_longer_forces_brief_answers():
+def test_minimal_general_prompt_keeps_shared_response_basics():
     prompt_messages = _minimal_odysseus_general_messages([
         {"role": "user", "content": "Explain how solar panels work"},
     ])
 
     system = prompt_messages[0]["content"]
-    assert "substantial, useful detail" in system
-    assert "be brief only for simple acknowledgements" in system
-    assert "Answer directly and briefly" not in system
+    assert "You are Odysseus" in system
+    assert "Match the user's language and requested depth" in system
+    assert "never claim an action or result that did not occur" in system
 
 
 def test_polish_internet_search_request_classifies_as_web():
