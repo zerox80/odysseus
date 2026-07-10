@@ -111,6 +111,21 @@ def _join_checked_gallery_endpoint(base: str, path: str) -> str:
     return base + path
 
 
+def _pinned_gallery_transport(url: str):
+    """Resolve and pin an image-provider connection immediately before use."""
+    from src.url_safety import validated_outbound_ips
+    from src.url_security import PinnedAsyncTransport
+
+    try:
+        pinned_ip = validated_outbound_ips(
+            url,
+            block_private=os.getenv("IMAGE_BLOCK_PRIVATE_IPS", "false").lower() == "true",
+        )[0]
+    except ValueError as exc:
+        raise HTTPException(400, f"Rejected endpoint URL: {exc}") from exc
+    return PinnedAsyncTransport(pinned_ip)
+
+
 def _visible_image_endpoint_query(db, owner: str | None):
     from src.auth_helpers import owner_filter
     q = db.query(ModelEndpoint).filter(
@@ -154,15 +169,20 @@ async def _fetch_result_image_b64(url: str) -> Optional[str]:
     """
     import base64
     import httpx
-    from src.url_safety import check_outbound_url
+    from src.url_safety import validated_outbound_ips
+    from src.url_security import PinnedAsyncTransport
 
-    ok, reason = check_outbound_url(
-        url,
-        block_private=os.getenv("IMAGE_BLOCK_PRIVATE_IPS", "false").lower() == "true",
-    )
-    if not ok:
-        raise HTTPException(502, f"Upstream returned an unsafe image URL: {reason}")
-    async with httpx.AsyncClient(timeout=60) as c2:
+    try:
+        pinned_ip = validated_outbound_ips(
+            url,
+            block_private=os.getenv("IMAGE_BLOCK_PRIVATE_IPS", "false").lower() == "true",
+        )[0]
+    except ValueError as exc:
+        raise HTTPException(502, f"Upstream returned an unsafe image URL: {exc}") from exc
+    async with httpx.AsyncClient(
+        timeout=60, transport=PinnedAsyncTransport(pinned_ip),
+        follow_redirects=False, trust_env=False,
+    ) as c2:
         ir = await c2.get(url)
         if ir.status_code == 200:
             return base64.b64encode(ir.content).decode()
@@ -411,7 +431,10 @@ def setup_gallery_routes() -> APIRouter:
 
         # Use img2img endpoint if available, otherwise upscale via canvas on client
         try:
-            async with httpx.AsyncClient(timeout=120) as client:
+            async with httpx.AsyncClient(
+                timeout=120, transport=_pinned_gallery_transport(base_url),
+                follow_redirects=False, trust_env=False,
+            ) as client:
                 resp = await client.post(f"{base_url}/images/upscale", json={
                     "image": b64, "scale": scale,
                 })
@@ -454,7 +477,10 @@ def setup_gallery_routes() -> APIRouter:
             base_url += "/v1"
 
         try:
-            async with httpx.AsyncClient(timeout=180) as client:
+            async with httpx.AsyncClient(
+                timeout=180, transport=_pinned_gallery_transport(base_url),
+                follow_redirects=False, trust_env=False,
+            ) as client:
                 resp = await client.post(f"{base_url}/images/generations", json={
                     "prompt": prompt,
                     "image": b64,
@@ -1197,7 +1223,10 @@ def setup_gallery_routes() -> APIRouter:
             }
             headers = {"Authorization": f"Bearer {api_key}"}
             try:
-                async with httpx.AsyncClient(timeout=120) as client:
+                async with httpx.AsyncClient(
+                    timeout=120, transport=_pinned_gallery_transport(base),
+                    follow_redirects=False, trust_env=False,
+                ) as client:
                     r = await client.post(_join_checked_gallery_endpoint(base, "/images/edits"), headers=headers, data=data, files=files)
                     if r.status_code != 200:
                         logger.error("inpaint_proxy OpenAI edit: status %s", r.status_code)
@@ -1247,7 +1276,10 @@ def setup_gallery_routes() -> APIRouter:
             # supports multiple models per process. Harmless if ignored.
             if chosen_model:
                 body["model"] = chosen_model
-            async with httpx.AsyncClient(timeout=120) as client:
+            async with httpx.AsyncClient(
+                timeout=120, transport=_pinned_gallery_transport(base),
+                follow_redirects=False, trust_env=False,
+            ) as client:
                 r = await client.post(_join_checked_gallery_endpoint(base, "/images/inpaint"), json=body)
                 if r.status_code != 200:
                     logger.error("inpaint_proxy diffusion: status %s", r.status_code)
@@ -1415,7 +1447,10 @@ def setup_gallery_routes() -> APIRouter:
         # Cold-start SDXL inpaint can take 60-90s on first request (loading
         # weights to GPU). 240s gives headroom for both that and a full
         # 1024×1024 inference pass on slower setups.
-        async with httpx.AsyncClient(timeout=240) as client:
+        async with httpx.AsyncClient(
+            timeout=240, transport=_pinned_gallery_transport(base),
+            follow_redirects=False, trust_env=False,
+        ) as client:
             for path, kind, payload in candidates:
                 _effective_base = base_root if path.startswith("/sdapi") else base
                 target = _join_checked_gallery_endpoint(_effective_base, path)
@@ -1938,7 +1973,10 @@ def setup_gallery_routes() -> APIRouter:
             if headers:
                 h.update(headers)
 
-            async with httpx.AsyncClient(timeout=60) as client:
+            async with httpx.AsyncClient(
+                timeout=60, transport=_pinned_gallery_transport(chat_url),
+                follow_redirects=False, trust_env=False,
+            ) as client:
                 resp = await client.post(chat_url, json=payload, headers=h)
                 if resp.status_code != 200:
                     logger.error("ai_tag vision model: status %s: %s", resp.status_code, resp.text[:500])

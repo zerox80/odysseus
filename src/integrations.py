@@ -409,13 +409,14 @@ async def execute_api_call(
     # loopback for locked-down deployments. Private stays allowed by default
     # because LAN integrations (Home Assistant, Miniflux, ntfy) are the
     # primary use case.
-    from src.url_safety import check_outbound_url
+    from src.url_safety import validated_outbound_ips
     block_private = os.getenv(
         "INTEGRATION_API_BLOCK_PRIVATE_IPS", "false"
     ).lower() == "true"
-    ok, reason = check_outbound_url(url, block_private=block_private)
-    if not ok:
-        return {"error": f"URL rejected: {reason}", "exit_code": 1}
+    try:
+        pinned_ip = validated_outbound_ips(url, block_private=block_private)[0]
+    except ValueError as exc:
+        return {"error": f"URL rejected: {exc}", "exit_code": 1}
 
     method = method.upper()
 
@@ -455,7 +456,11 @@ async def execute_api_call(
             auth = httpx.BasicAuth(parts[0], parts[1])
 
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        from src.url_security import PinnedAsyncTransport
+        async with httpx.AsyncClient(
+            timeout=30.0, transport=PinnedAsyncTransport(pinned_ip),
+            follow_redirects=False, trust_env=False,
+        ) as client:
             response = await client.request(
                 method,
                 url,

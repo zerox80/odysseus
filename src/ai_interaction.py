@@ -897,7 +897,8 @@ async def do_generate_image(content: str, session_id: Optional[str] = None, owne
     import httpx
     import os
     from pathlib import Path
-    from src.url_safety import check_outbound_url
+    from src.url_safety import validated_outbound_ips
+    from src.url_security import PinnedTransport
 
     lines = content.strip().split("\n")
     prompt = lines[0].strip() if lines else ""
@@ -1066,14 +1067,19 @@ async def do_generate_image(content: str, session_id: Optional[str] = None, owne
             elif img.get("url"):
                 # Download external URL and save locally (DALL-E returns temp URLs)
                 result_url = img["url"]
-                ok, reason = check_outbound_url(
-                    result_url,
-                    block_private=os.getenv("IMAGE_BLOCK_PRIVATE_IPS", "false").lower() == "true",
-                )
-                if not ok:
-                    return {"error": f"Image API returned unsafe image URL: {reason}"}
                 try:
-                    dl_resp = httpx.get(result_url, timeout=60)
+                    pinned_ip = validated_outbound_ips(
+                        result_url,
+                        block_private=os.getenv("IMAGE_BLOCK_PRIVATE_IPS", "false").lower() == "true",
+                    )[0]
+                except ValueError as exc:
+                    return {"error": f"Image API returned unsafe image URL: {exc}"}
+                try:
+                    with httpx.Client(
+                        transport=PinnedTransport(pinned_ip), timeout=60,
+                        follow_redirects=False, trust_env=False,
+                    ) as client:
+                        dl_resp = client.get(result_url)
                     if dl_resp.status_code == 200:
                         img_dir = Path(GENERATED_IMAGES_DIR)
                         img_dir.mkdir(parents=True, exist_ok=True)

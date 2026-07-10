@@ -1,7 +1,16 @@
 import httpx
 import pytest
 
+import src.embeddings as embeddings
 from src.embeddings import EmbeddingClient
+
+
+@pytest.fixture(autouse=True)
+def _pin_test_embedding_hostname(monkeypatch):
+    monkeypatch.setattr(
+        embeddings, "validated_outbound_ips",
+        lambda *_args, **_kwargs: [__import__("ipaddress").ip_address("127.0.0.1")],
+    )
 
 
 class _FakeEmbeddingHttpClient:

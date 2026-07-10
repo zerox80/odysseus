@@ -1,3 +1,5 @@
+import ipaddress
+
 from src import ai_interaction
 
 
@@ -57,16 +59,26 @@ async def test_generate_image_validates_provider_url_before_download(monkeypatch
     events = []
     _patch_generation(monkeypatch, provider_url)
 
-    def _check_outbound_url(url, *, block_private=False):
+    def _validated_outbound_ips(url, *, block_private=False):
         events.append(("check", url, block_private))
-        return True, "ok"
+        return [ipaddress.ip_address("93.184.216.34")]
 
-    def _get(url, *, timeout):
-        events.append(("get", url, timeout))
-        return _DownloadResponse()
+    class _Client:
+        def __init__(self, **kwargs):
+            pass
 
-    monkeypatch.setattr(url_safety, "check_outbound_url", _check_outbound_url)
-    monkeypatch.setattr(httpx, "get", _get)
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def get(self, url):
+            events.append(("get", url, 60))
+            return _DownloadResponse()
+
+    monkeypatch.setattr(url_safety, "validated_outbound_ips", _validated_outbound_ips)
+    monkeypatch.setattr(httpx, "Client", _Client)
 
     result = await ai_interaction.do_generate_image("draw a chair\ndall-e-3")
 
@@ -85,15 +97,14 @@ async def test_generate_image_rejects_unsafe_provider_url_without_download(monke
     events = []
     _patch_generation(monkeypatch, unsafe_url)
 
-    def _check_outbound_url(url, *, block_private=False):
+    def _validated_outbound_ips(url, *, block_private=False):
         events.append(("check", url, block_private))
-        return False, "link-local address blocked (SSRF metadata risk): 169.254.169.254"
+        raise ValueError("link-local address blocked (SSRF metadata risk): 169.254.169.254")
 
     def _get(url, *, timeout):
         raise AssertionError("unsafe provider image URL must not be downloaded")
 
-    monkeypatch.setattr(url_safety, "check_outbound_url", _check_outbound_url)
-    monkeypatch.setattr(httpx, "get", _get)
+    monkeypatch.setattr(url_safety, "validated_outbound_ips", _validated_outbound_ips)
 
     result = await ai_interaction.do_generate_image("draw a chair\ndall-e-3")
 

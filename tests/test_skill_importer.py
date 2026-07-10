@@ -68,11 +68,7 @@ def test_fetch_bytes_rejects_cross_host_redirect(monkeypatch):
         def get(self, url, headers=None):
             return _Resp()
 
-    monkeypatch.setattr("services.memory.skill_importer.httpx.Client", _Client)
-    monkeypatch.setattr(
-        "services.memory.skill_importer.check_outbound_url",
-        lambda url: (True, ""),
-    )
+    monkeypatch.setattr("services.memory.skill_importer._pinned_get", lambda *args, **kwargs: _Resp())
     with pytest.raises(SkillImportError, match="redirect target"):
         _fetch_bytes("https://raw.githubusercontent.com/o/r/main/SKILL.md")
 
@@ -88,10 +84,6 @@ def test_list_github_dir_accepts_api_github_response(monkeypatch):
     monkeypatch.setattr(
         "services.memory.skill_importer._fetch_text",
         lambda url: "# skill\n",
-    )
-    monkeypatch.setattr(
-        "services.memory.skill_importer.check_outbound_url",
-        lambda url: (True, ""),
     )
 
     class _Resp:
@@ -121,7 +113,7 @@ def test_list_github_dir_accepts_api_github_response(monkeypatch):
         def get(self, url, headers=None):
             return _Resp()
 
-    monkeypatch.setattr("services.memory.skill_importer.httpx.Client", _Client)
+    monkeypatch.setattr("services.memory.skill_importer._pinned_get", lambda *args, **kwargs: _Resp())
 
     out = {}
     src = ResolvedSource(owner="o", repo="r", ref="main", path="")
@@ -143,11 +135,7 @@ def _mock_httpx_client(monkeypatch, response):
         def get(self, url, headers=None):
             return response
 
-    monkeypatch.setattr("services.memory.skill_importer.httpx.Client", _Client)
-    monkeypatch.setattr(
-        "services.memory.skill_importer.check_outbound_url",
-        lambda url: (True, ""),
-    )
+    monkeypatch.setattr("services.memory.skill_importer._pinned_get", lambda *args, **kwargs: response)
 
 
 def test_list_github_dir_surfaces_rate_limit(monkeypatch):

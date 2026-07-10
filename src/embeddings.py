@@ -32,6 +32,8 @@ import httpx
 from typing import List, Optional
 
 from src.runtime_paths import get_app_root
+from src.url_safety import validated_outbound_ips
+from src.url_security import PinnedTransport
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +56,14 @@ class EmbeddingClient:
         # running on :11434) fast-fails to the local FastEmbed fallback instead
         # of stalling startup ~30s per probe. Read stays generous for a real
         # endpoint (embedding a short string returns in well under a second).
-        self._client = httpx.Client(timeout=httpx.Timeout(connect=3.0, read=10.0, write=5.0, pool=3.0))
+        block_private = os.getenv("EMBEDDING_BLOCK_PRIVATE_IPS", "false").lower() == "true"
+        pinned_ip = validated_outbound_ips(self.url, block_private=block_private)[0]
+        self._client = httpx.Client(
+            transport=PinnedTransport(pinned_ip),
+            timeout=httpx.Timeout(connect=3.0, read=10.0, write=5.0, pool=3.0),
+            follow_redirects=False,
+            trust_env=False,
+        )
         self._batch_size = max(1, int(os.getenv("EMBEDDING_BATCH_SIZE", "8")))
         self._max_chars = max(200, int(os.getenv("EMBEDDING_MAX_CHARS", "900")))
 

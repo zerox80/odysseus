@@ -172,6 +172,26 @@ class _PinnedAsyncBackend(httpcore.AsyncNetworkBackend):
         return await self._real.sleep(seconds)
 
 
+class _PinnedSyncBackend(httpcore.NetworkBackend):
+    """Route synchronous TCP connections to one validated IP address."""
+
+    def __init__(self, ip: ipaddress._BaseAddress):
+        self._ip = str(ip)
+        self._real = httpcore.SyncBackend()
+
+    def connect_tcp(self, host, port, timeout=None, local_address=None,
+                    socket_options=None):
+        return self._real.connect_tcp(
+            self._ip, port, timeout, local_address, socket_options
+        )
+
+    def connect_unix_socket(self, path, timeout=None, socket_options=None):
+        return self._real.connect_unix_socket(path, timeout, socket_options)
+
+    def sleep(self, seconds: float) -> None:
+        return self._real.sleep(seconds)
+
+
 class PinnedAsyncTransport(httpx.AsyncBaseTransport):
     """HTTP/1.1 transport that pins connects to a validated public IP.
 
@@ -219,3 +239,51 @@ class PinnedAsyncTransport(httpx.AsyncBaseTransport):
 
     async def aclose(self) -> None:
         await self._pool.aclose()
+
+
+class PinnedTransport(httpx.BaseTransport):
+    """Synchronous HTTP/1.1 transport that pins connects to a validated IP.
+
+    Use a short-lived client with ``follow_redirects=False``. Redirect targets
+    must be validated and pinned independently.
+    """
+
+    def __init__(self, ip: ipaddress._BaseAddress):
+        self._pool = httpcore.ConnectionPool(
+            ssl_context=ssl.create_default_context(),
+            http1=True,
+            http2=False,
+            network_backend=_PinnedSyncBackend(ip),
+        )
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        core_request = httpcore.Request(
+            method=request.method,
+            url=httpcore.URL(
+                scheme=request.url.raw_scheme,
+                host=request.url.raw_host,
+                port=request.url.port,
+                target=request.url.raw_path,
+            ),
+            headers=request.headers.raw,
+            content=request.stream,
+            extensions=request.extensions,
+        )
+        try:
+            core_response = self._pool.handle_request(core_request)
+            content = b"".join(core_response.iter_stream())
+            core_response.close()
+        except Exception as exc:
+            mapped = _HTTPCORE_TO_HTTPX_EXC.get(type(exc))
+            if mapped is not None:
+                raise mapped(str(exc)) from exc
+            raise
+        return httpx.Response(
+            status_code=core_response.status,
+            headers=core_response.headers,
+            content=content,
+            extensions=core_response.extensions,
+        )
+
+    def close(self) -> None:
+        self._pool.close()

@@ -56,30 +56,49 @@ def check_outbound_url(
     Returns ``(ok, reason)``. ``ok`` is True only when the URL is safe to fetch.
     ``resolver`` is injectable so callers/tests can avoid real DNS.
     """
+    try:
+        validated_outbound_ips(url, block_private=block_private, resolver=resolver)
+    except ValueError as exc:
+        return False, str(exc)
+    return True, "ok"
+
+
+def validated_outbound_ips(
+    url: str,
+    *,
+    block_private: bool = False,
+    resolver: Optional[Callable[[str], List[str]]] = None,
+) -> List[ipaddress._BaseAddress]:
+    """Resolve a safe URL to concrete addresses for DNS-rebinding-safe connects.
+
+    Every DNS answer is inspected and a mixed safe/unsafe answer fails closed.
+    Pass one returned address to a pinned HTTP transport; a normal HTTP client
+    would resolve the hostname a second time after validation.
+    """
     if not isinstance(url, str):
-        return False, "URL must be a string"
+        raise ValueError("URL must be a string")
     if not url or not url.strip():
-        return False, "URL is required"
+        raise ValueError("URL is required")
     try:
         parsed = urlparse(url.strip())
     except Exception as e:  # pragma: no cover - urlparse is very tolerant
-        return False, f"unparseable URL: {e}"
+        raise ValueError(f"unparseable URL: {e}") from e
 
     if parsed.scheme.lower() not in ALLOWED_SCHEMES:
-        return False, f"scheme must be http or https, got '{parsed.scheme or '(none)'}'"
+        raise ValueError(f"scheme must be http or https, got '{parsed.scheme or '(none)'}'")
     host = parsed.hostname
     if not host:
-        return False, "URL has no host"
+        raise ValueError("URL has no host")
 
     resolve = resolver or _default_resolver
     try:
         raw_ips = resolve(host)
     except Exception as e:
-        return False, f"host does not resolve: {e}"
+        raise ValueError(f"host does not resolve: {e}") from e
     if not raw_ips:
-        return False, "host does not resolve"
+        raise ValueError("host does not resolve")
 
-    saw_ip = False
+    ips: List[ipaddress._BaseAddress] = []
     for raw in raw_ips:
         if not isinstance(raw, str):
             continue
@@ -87,10 +106,10 @@ def check_outbound_url(
             ip = ipaddress.ip_address(raw.split("%")[0])  # strip IPv6 zone id
         except ValueError:
             continue
-        saw_ip = True
         reason = _classify(ip, block_private=block_private)
         if reason:
-            return False, reason
-    if not saw_ip:
-        return False, "host does not resolve to an IP"
-    return True, "ok"
+            raise ValueError(reason)
+        ips.append(ip)
+    if not ips:
+        raise ValueError("host does not resolve to an IP")
+    return ips

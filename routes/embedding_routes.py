@@ -7,6 +7,7 @@ import logging
 import asyncio
 from pathlib import Path
 from fastapi import APIRouter, HTTPException, Form, Depends
+from core.atomic_io import atomic_write_json
 from core.constants import EMBEDDING_ENDPOINT_FILE, FASTEMBED_CACHE_DIR
 from core.middleware import require_admin
 from src.runtime_paths import get_app_root
@@ -105,8 +106,7 @@ def _load_custom_endpoint() -> dict:
 
 
 def _save_custom_endpoint(data: dict):
-    Path(_ENDPOINT_FILE).parent.mkdir(parents=True, exist_ok=True)
-    Path(_ENDPOINT_FILE).write_text(json.dumps(data, indent=2), encoding="utf-8")
+    atomic_write_json(_ENDPOINT_FILE, data, indent=2)
 
 
 def setup_embedding_routes():
@@ -263,24 +263,29 @@ def setup_embedding_routes():
         # request. Local-first means loopback/LAN endpoints are allowed by
         # default; non-HTTP(S) schemes and the cloud metadata range are always
         # rejected. Set EMBEDDING_BLOCK_PRIVATE_IPS=true for full lockdown.
-        from src.url_safety import check_outbound_url
-        ok, reason = check_outbound_url(
-            url,
-            block_private=os.getenv("EMBEDDING_BLOCK_PRIVATE_IPS", "false").lower() == "true",
-        )
-        if not ok:
-            raise HTTPException(400, f"Rejected endpoint URL: {reason}")
+        from src.url_safety import validated_outbound_ips
+        try:
+            pinned_ip = validated_outbound_ips(
+                url,
+                block_private=os.getenv("EMBEDDING_BLOCK_PRIVATE_IPS", "false").lower() == "true",
+            )[0]
+        except ValueError as exc:
+            raise HTTPException(400, f"Rejected endpoint URL: {exc}") from exc
 
         # Quick health check
         try:
             import httpx
-            resp = httpx.post(
-                url,
-                json={"input": ["test"], "model": model or "test"},
-                headers={"Authorization": f"Bearer {api_key}"} if api_key else {},
-                timeout=10,
-            )
-            resp.raise_for_status()
+            from src.url_security import PinnedTransport
+            with httpx.Client(
+                transport=PinnedTransport(pinned_ip), timeout=10,
+                follow_redirects=False, trust_env=False,
+            ) as client:
+                resp = client.post(
+                    url,
+                    json={"input": ["test"], "model": model or "test"},
+                    headers={"Authorization": f"Bearer {api_key}"} if api_key else {},
+                )
+                resp.raise_for_status()
         except Exception as e:
             raise HTTPException(400, f"Endpoint unreachable: {e}")
 

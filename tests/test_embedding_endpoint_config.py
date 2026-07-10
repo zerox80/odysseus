@@ -23,3 +23,21 @@ def test_load_custom_endpoint_keeps_object_json(tmp_path, monkeypatch):
         "url": "http://127.0.0.1:11434",
         "model": "nomic-embed-text",
     }
+
+
+def test_save_custom_endpoint_uses_atomic_json_write(monkeypatch):
+    saved = {}
+
+    def _atomic_write_json(path, data, *, indent=None):
+        saved.update(path=path, data=data, indent=indent)
+
+    monkeypatch.setattr(embedding_routes, "atomic_write_json", _atomic_write_json)
+    monkeypatch.setattr(embedding_routes, "_ENDPOINT_FILE", "test-endpoint.json")
+
+    embedding_routes._save_custom_endpoint({"url": "http://localhost:11434"})
+
+    assert saved == {
+        "path": "test-endpoint.json",
+        "data": {"url": "http://localhost:11434"},
+        "indent": 2,
+    }

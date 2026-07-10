@@ -449,13 +449,18 @@ async def dispatch_reminder(
                         # REMINDER_WEBHOOK_BLOCK_PRIVATE_IPS=true to also block
                         # RFC-1918 ranges for locked-down deployments.
                         import os as _os
-                        from src.url_safety import check_outbound_url as _chk
+                        from src.url_safety import validated_outbound_ips
+                        from src.url_security import PinnedAsyncTransport
                         _block = _os.getenv("REMINDER_WEBHOOK_BLOCK_PRIVATE_IPS", "false").lower() == "true"
-                        _ok, _reason = _chk(url, block_private=_block)
-                        if not _ok:
-                            webhook_error = f"Webhook URL rejected: {_reason}"
+                        try:
+                            pinned_ip = validated_outbound_ips(url, block_private=_block)[0]
+                        except ValueError as exc:
+                            webhook_error = f"Webhook URL rejected: {exc}"
                         else:
-                            async with httpx.AsyncClient(timeout=10.0) as client:
+                            async with httpx.AsyncClient(
+                                timeout=10.0, transport=PinnedAsyncTransport(pinned_ip),
+                                follow_redirects=False, trust_env=False,
+                            ) as client:
                                 resp = await client.post(url, content=rendered.encode(), headers=hdrs)
                                 webhook_sent = resp.is_success
                                 if not webhook_sent:
@@ -488,14 +493,20 @@ async def dispatch_reminder(
                 # REMINDER_WEBHOOK_BLOCK_PRIVATE_IPS=true also blocks RFC-1918
                 # so a ntfy base_url can't be pointed at internal services.
                 import os as _os
-                from src.url_safety import check_outbound_url as _chk
+                from src.url_safety import validated_outbound_ips
+                from src.url_security import PinnedAsyncTransport
                 _block = _os.getenv("REMINDER_WEBHOOK_BLOCK_PRIVATE_IPS", "false").lower() == "true"
-                _ok, _reason = _chk(f"{base}/{topic}", block_private=_block)
-                if not _ok:
-                    ntfy_error = f"ntfy URL rejected: {_reason}"
+                target = f"{base}/{topic}"
+                try:
+                    pinned_ip = validated_outbound_ips(target, block_private=_block)[0]
+                except ValueError as exc:
+                    ntfy_error = f"ntfy URL rejected: {exc}"
                 else:
-                    async with httpx.AsyncClient(timeout=10.0) as client:
-                        resp = await client.post(f"{base}/{topic}", content=ntfy_body, headers=hdrs)
+                    async with httpx.AsyncClient(
+                        timeout=10.0, transport=PinnedAsyncTransport(pinned_ip),
+                        follow_redirects=False, trust_env=False,
+                    ) as client:
+                        resp = await client.post(target, content=ntfy_body, headers=hdrs)
                         ntfy_sent = resp.is_success
                         if not ntfy_sent:
                             ntfy_error = f"ntfy returned HTTP {resp.status_code}"
