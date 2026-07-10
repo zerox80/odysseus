@@ -9,10 +9,12 @@ from routes import personal_routes
 
 
 def _upload_endpoint():
+    # The registered route takes only `request` (multipart is parsed inside);
+    # these service-level tests use the direct-call seam to inject file stubs.
     router = personal_routes.setup_personal_routes(_FakePersonalDocs(), None, True)
     for route in router.routes:
         if getattr(route, "path", "") == "/api/personal/upload" and "POST" in getattr(route, "methods", set()):
-            return route.endpoint
+            return route.endpoint.direct_handler
     raise AssertionError("upload endpoint not found")
 
 

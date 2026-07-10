@@ -35,7 +35,7 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "bash",
-            "description": "Run a bounded shell command in the isolated executor. It sees only the active workspace and has no app secrets, host filesystem, SSH material, Docker socket, or unrestricted network. Use it for workspace-local git, builds, and scripts; it cannot administer the host. Prefer a dedicated tool whenever one fits the job (reading, writing, editing, searching, or listing files). Do NOT create or edit files via bash redirects/heredocs/sed -- use the dedicated file tools.",
+            "description": "Run a bounded bash command in the isolated executor. It sees only the active workspace and has no app secrets, host filesystem, SSH material, Docker socket, or unrestricted network. Use it for workspace-local git, shell scripts, and Python; the executor has no compilers or package installers, so it cannot build native code, install software, or administer the host. Prefer a dedicated tool whenever one fits the job (reading, writing, editing, searching, or listing files). Do NOT create or edit files via bash redirects/heredocs/sed -- use the dedicated file tools.",
             "parameters": {
                 "type": "object",
                 "properties": {

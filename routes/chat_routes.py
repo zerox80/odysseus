@@ -785,6 +785,7 @@ def setup_chat_routes(
             # index would be useless / unwanted noise.
             agent_mode=(chat_mode == "agent"),
             allow_tool_preprocessing=allow_tool_preprocessing,
+            workspace=workspace or None,
         )
 
         _research_flags = {"do": do_research}  # Mutable container for generator scope

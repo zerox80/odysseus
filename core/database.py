@@ -1847,11 +1847,13 @@ def _migrate_seed_email_account():
 def _migrate_add_outbound_url_policy():
     """Add a fail-closed provenance marker for persisted API-chat sessions.
 
-    Older ``API Chat`` rows cannot tell whether their endpoint originated from
-    a token-supplied ``base_url``. Mark them ``legacy-api-unknown`` rather than
-    risk resuming a potentially unpinned endpoint. Newly created rows use the
-    model default (``configured``) unless the route explicitly marks them as a
-    direct-public endpoint.
+    Only pre-existing ``API Chat`` rows cannot tell whether their endpoint
+    originated from a token-supplied ``base_url``; mark exactly those
+    ``legacy-api-unknown`` rather than risk resuming a potentially unpinned
+    endpoint. Every other existing session was created through configured
+    endpoints and keeps the model default (``configured``) — stamping them
+    ``legacy-api-unknown`` would block API-token resume for all normal
+    sessions after the upgrade.
     """
     if not DATABASE_URL.startswith("sqlite"):
         return
@@ -1865,11 +1867,15 @@ def _migrate_add_outbound_url_policy():
         if "outbound_url_policy" not in columns:
             conn.execute(
                 "ALTER TABLE sessions ADD COLUMN outbound_url_policy "
-                "TEXT NOT NULL DEFAULT 'legacy-api-unknown'"
+                "TEXT NOT NULL DEFAULT 'configured'"
+            )
+            conn.execute(
+                "UPDATE sessions SET outbound_url_policy = 'legacy-api-unknown' "
+                "WHERE name = 'API Chat'"
             )
             conn.commit()
             logging.getLogger(__name__).info(
-                "Migrated: added fail-closed outbound URL policy to sessions"
+                "Migrated: added fail-closed outbound URL policy to API Chat sessions"
             )
     except Exception as e:
         logging.getLogger(__name__).warning(f"outbound URL policy migration failed: {e}")

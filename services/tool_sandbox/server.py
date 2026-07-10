@@ -120,6 +120,12 @@ def _workspace_cwd(workdir: object) -> Path:
     return candidate
 
 
+# The bash tool's contract is a bash shell (agents routinely emit bash-isms
+# like [[ ]], pipefail, process substitution). The container image ships bash;
+# plain /bin/sh remains the fallback for minimal native deployments.
+SHELL_PATH = "/bin/bash" if os.path.exists("/bin/bash") else "/bin/sh"
+
+
 def _run(command: str, timeout: int, workdir: object) -> dict[str, object]:
     cwd = _workspace_cwd(workdir)
     env = {
@@ -129,7 +135,7 @@ def _run(command: str, timeout: int, workdir: object) -> dict[str, object]:
         "PATH": "/usr/local/bin:/usr/bin:/bin",
     }
     proc = subprocess.Popen(
-        ["/bin/sh", "-lc", command],
+        [SHELL_PATH, "-lc", command],
         cwd=cwd,
         env=env,
         stdin=subprocess.DEVNULL,

@@ -2888,8 +2888,9 @@ async def stream_agent_loop(
                 _relevant_tools.difference_update(_email_fetch_tools)
                 logger.info("[agent-intent] active email draft pruned fetch tools=%s", removed)
 
-    # Current-turn chat uploads are real files under the upload/data root. Make
-    # the read-side file/document tools visible immediately so the agent can
+    # Current-turn chat uploads are staged as real files inside the
+    # tool-visible workspace tree (see build_uploaded_file_manifest). Make the
+    # read-side file/document tools visible immediately so the agent can
     # inspect files whose inline text was truncated or omitted.
     if not guide_only and uploaded_files:
         if _relevant_tools is None:

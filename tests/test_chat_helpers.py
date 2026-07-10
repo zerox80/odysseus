@@ -178,7 +178,7 @@ def _manifest_test_dir(name):
     return root
 
 
-def test_build_uploaded_file_manifest_filters_and_nulls_unreadable_paths(monkeypatch):
+def test_build_uploaded_file_manifest_stages_uploads_into_workspace(monkeypatch):
     root = _manifest_test_dir("manifest")
     try:
         upload_dir = root / "uploads"
@@ -188,14 +188,13 @@ def test_build_uploaded_file_manifest_filters_and_nulls_unreadable_paths(monkeyp
         outside = root / "outside.txt"
         outside.write_text("nope", encoding="utf-8")
         missing = upload_dir / "missing.txt"
+        workspace_root = root / "workspace"
+        workspace_root.mkdir()
 
-        import src.settings as settings
-
-        monkeypatch.setattr(
-            settings,
-            "get_setting",
-            lambda key: [str(upload_dir)] if key == "tool_path_extra_roots" else None,
-        )
+        # Uploads live outside the workspace root, so file tools cannot open
+        # them in place — agent mode must stage a copy into the workspace.
+        monkeypatch.setenv("ODYSSEUS_AGENT_WORKSPACE_ROOT", str(workspace_root))
+        monkeypatch.setattr(chat_helpers, "_caller_may_use_file_tools", lambda owner: True)
         handler = _ManifestUploadHandler(upload_dir, {
             "good": {
                 "id": "good",
@@ -230,10 +229,15 @@ def test_build_uploaded_file_manifest_filters_and_nulls_unreadable_paths(monkeyp
             ["good", "bob", "outside", "missing", "bad"],
             handler,
             owner="alice",
+            stage_for_tools=True,
         )
 
         assert [item["id"] for item in manifest] == ["good", "outside", "missing"]
-        assert os.path.realpath(manifest[0]["path"]) == os.path.realpath(good)
+        staged = manifest[0]["path"]
+        assert staged is not None
+        assert Path(staged).is_file()
+        assert Path(staged).read_text(encoding="utf-8") == "hello"
+        assert os.path.realpath(staged).startswith(os.path.realpath(workspace_root))
         assert manifest[1]["path"] is None
         assert manifest[2]["path"] is None
         assert handler.calls == [
@@ -247,6 +251,90 @@ def test_build_uploaded_file_manifest_filters_and_nulls_unreadable_paths(monkeyp
         shutil.rmtree(root, ignore_errors=True)
 
 
+def test_build_uploaded_file_manifest_stages_into_active_workspace(monkeypatch):
+    root = _manifest_test_dir("manifest-workspace")
+    try:
+        upload_dir = root / "uploads"
+        upload_dir.mkdir()
+        upload = upload_dir / "notes.txt"
+        upload.write_text("workspace copy", encoding="utf-8")
+        workspace_root = root / "workspace"
+        project = workspace_root / "project"
+        project.mkdir(parents=True)
+
+        monkeypatch.setenv("ODYSSEUS_AGENT_WORKSPACE_ROOT", str(workspace_root))
+        monkeypatch.setattr(chat_helpers, "_caller_may_use_file_tools", lambda owner: True)
+        handler = _ManifestUploadHandler(upload_dir, {
+            "notes": {"id": "notes", "name": "notes.txt", "path": str(upload), "owner": "alice"},
+        })
+
+        manifest = build_uploaded_file_manifest(
+            ["notes"], handler, owner="alice",
+            workspace=str(project), stage_for_tools=True,
+        )
+
+        staged = manifest[0]["path"]
+        assert staged is not None
+        # Staged inside the bound workspace so the per-turn confinement
+        # (paths restricted to the active workspace) can still open it.
+        assert os.path.realpath(staged).startswith(os.path.realpath(project))
+        assert Path(staged).read_text(encoding="utf-8") == "workspace copy"
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_build_uploaded_file_manifest_does_not_stage_outside_agent_mode(monkeypatch):
+    root = _manifest_test_dir("manifest-chatmode")
+    try:
+        upload_dir = root / "uploads"
+        upload_dir.mkdir()
+        upload = upload_dir / "notes.txt"
+        upload.write_text("hello", encoding="utf-8")
+        workspace_root = root / "workspace"
+        workspace_root.mkdir()
+
+        monkeypatch.setenv("ODYSSEUS_AGENT_WORKSPACE_ROOT", str(workspace_root))
+        monkeypatch.setattr(chat_helpers, "_caller_may_use_file_tools", lambda owner: True)
+        handler = _ManifestUploadHandler(upload_dir, {
+            "notes": {"id": "notes", "name": "notes.txt", "path": str(upload), "owner": "alice"},
+        })
+
+        manifest = build_uploaded_file_manifest(["notes"], handler, owner="alice")
+
+        assert manifest[0]["path"] is None
+        assert not (workspace_root / "chat_uploads").exists()
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_build_uploaded_file_manifest_does_not_stage_for_non_admin_owner(monkeypatch):
+    root = _manifest_test_dir("manifest-nonadmin")
+    try:
+        upload_dir = root / "uploads"
+        upload_dir.mkdir()
+        upload = upload_dir / "notes.txt"
+        upload.write_text("private", encoding="utf-8")
+        workspace_root = root / "workspace"
+        workspace_root.mkdir()
+
+        monkeypatch.setenv("ODYSSEUS_AGENT_WORKSPACE_ROOT", str(workspace_root))
+        # Multi-user, non-admin: no file tools — never copy a private upload
+        # into the shared workspace volume.
+        monkeypatch.setattr(chat_helpers, "_caller_may_use_file_tools", lambda owner: False)
+        handler = _ManifestUploadHandler(upload_dir, {
+            "notes": {"id": "notes", "name": "notes.txt", "path": str(upload), "owner": "alice"},
+        })
+
+        manifest = build_uploaded_file_manifest(
+            ["notes"], handler, owner="alice", stage_for_tools=True
+        )
+
+        assert manifest[0]["path"] is None
+        assert not (workspace_root / "chat_uploads").exists()
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def test_build_uploaded_file_manifest_hides_paths_read_file_cannot_open(monkeypatch):
     root = _manifest_test_dir("manifest-unreadable")
     try:
@@ -254,6 +342,9 @@ def test_build_uploaded_file_manifest_hides_paths_read_file_cannot_open(monkeypa
         upload_dir.mkdir()
         upload = upload_dir / "upload.txt"
         upload.write_text("hello", encoding="utf-8")
+        workspace_root = root / "workspace"
+        workspace_root.mkdir()
+        monkeypatch.setenv("ODYSSEUS_AGENT_WORKSPACE_ROOT", str(workspace_root))
         handler = _ManifestUploadHandler(upload_dir, {
             "upload": {"id": "upload", "name": "upload.txt", "path": str(upload), "owner": "alice"},
         })
@@ -262,9 +353,13 @@ def test_build_uploaded_file_manifest_hides_paths_read_file_cannot_open(monkeypa
             raise ValueError("outside the allowed roots")
 
         monkeypatch.setattr("src.tool_execution._resolve_tool_path", reject_path)
+        monkeypatch.setattr(chat_helpers, "_caller_may_use_file_tools", lambda owner: True)
 
-        manifest = build_uploaded_file_manifest(["upload"], handler, owner="alice")
+        manifest = build_uploaded_file_manifest(
+            ["upload"], handler, owner="alice", stage_for_tools=True
+        )
 
+        # Even a staged copy is reported only if the file tools can open it.
         assert manifest[0]["path"] is None
     finally:
         shutil.rmtree(root, ignore_errors=True)
