@@ -11,6 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from fastapi import HTTPException
 
 from routes.shell_routes import (
     _find_line_break,
@@ -58,6 +59,24 @@ def test_shell_routes_import_without_posix_pty_modules(monkeypatch):
 
     assert module.PTY_SUPPORTED is False
     assert module._find_line_break(b"ok\n") == (2, 1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["/api/shell/exec", "/api/shell/stream"])
+async def test_shell_execution_endpoints_reject_cross_site_requests(path):
+    """RCE-adjacent endpoints must reject cross-site requests before execution."""
+    import routes.shell_routes as shell_routes
+
+    route = next(route for route in shell_routes.setup_shell_routes().routes if route.path == path)
+    request = SimpleNamespace(
+        headers={"sec-fetch-site": "cross-site"},
+        app=SimpleNamespace(state=SimpleNamespace(auth_manager=None)),
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await route.endpoint(request, shell_routes.ShellExecRequest(command="echo should-not-run"))
+
+    assert exc_info.value.status_code == 403
 
 
 async def test_generate_pty_reports_explicit_unsupported_error(monkeypatch):

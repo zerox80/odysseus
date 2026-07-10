@@ -496,6 +496,7 @@ def setup_shell_routes() -> APIRouter:
     async def shell_exec(request: Request, req: ShellExecRequest) -> Dict[str, Any]:
         """Execute a shell command and return output. Admin only."""
         _require_admin(request)
+        _reject_cross_site(request)
         cmd = req.command.strip()
         if not cmd:
             return {"stdout": "", "stderr": "No command provided", "exit_code": 1}
@@ -514,6 +515,7 @@ def setup_shell_routes() -> APIRouter:
     async def shell_stream(request: Request, req: ShellExecRequest):
         """Execute a shell command and stream output line-by-line via SSE. Admin only."""
         _require_admin(request)
+        _reject_cross_site(request)
         cmd = req.command.strip()
         if not cmd:
 
