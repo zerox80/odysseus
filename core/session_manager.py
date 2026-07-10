@@ -130,6 +130,7 @@ class SessionManager:
             headers=headers,
             history=[],
             owner=getattr(db_session, "owner", None),
+            outbound_url_policy=getattr(db_session, "outbound_url_policy", "configured") or "configured",
             is_important=getattr(db_session, "is_important", False) or False,
         )
         session.message_count = getattr(db_session, "message_count", 0) or 0
@@ -188,6 +189,7 @@ class SessionManager:
             headers=headers,
             history=history,
             owner=getattr(db_session, 'owner', None),
+            outbound_url_policy=getattr(db_session, "outbound_url_policy", "configured") or "configured",
             is_important=getattr(db_session, 'is_important', False) or False,
         )
 
@@ -474,7 +476,8 @@ class SessionManager:
         endpoint_url: str,
         model: str,
         rag: bool = False,
-        owner: str = None
+        owner: str = None,
+        outbound_url_policy: str = "configured",
     ) -> Session:
         """Create a new session and save to database."""
         db = SessionLocal()
@@ -487,6 +490,7 @@ class SessionManager:
                 rag=rag,
                 headers={},
                 owner=owner,
+                outbound_url_policy=outbound_url_policy,
                 created_at=datetime.now(timezone.utc),
                 updated_at=datetime.now(timezone.utc)
             )
@@ -501,6 +505,7 @@ class SessionManager:
                 rag=rag,
                 headers={},
                 owner=owner,
+                outbound_url_policy=outbound_url_policy,
             )
 
             self.sessions[session_id] = session

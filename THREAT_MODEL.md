@@ -58,7 +58,51 @@ External content that reaches the LLM is treated as untrusted via `src/prompt_se
 - `untrusted_context_message(label, content)` wraps the content in a `user`-role message with a header block instructing the model not to follow instructions inside it. Content goes in as data, not as a system instruction.
 - `UNTRUSTED_CONTEXT_POLICY` is a system-prompt preamble that states the same policy at the top of every session where untrusted data may appear.
 
-**Untrusted surfaces that must go through this wrapper:** web search results, fetched URLs, emails (read), saved memories, skill text, notes, and any tool output sourced from outside the server. Injecting untrusted content directly into the system role is a security bug.
+**Untrusted surfaces that must go through this wrapper:** web search results, fetched URLs, emails (read), saved memories, skill text, notes, and any tool output sourced from outside the server. Email-reply generation keeps its system prompt static and sends original mail, attachments, retrieval context, and style examples as individually labelled untrusted `user` messages. Injecting untrusted content directly into the system role is a security bug.
+
+## Agent Command and Workspace Isolation
+
+Model-controlled `bash` and `python` commands use `src/sandbox_executor.py` and
+have **no app-host fallback**. The Docker deployment starts a separate
+`tool-sandbox` service that starts only long enough to bind a root-owned
+Unix-domain control socket and then drops to the dedicated unprivileged
+executor identity. It is read-only, has no retained capabilities,
+memory/CPU/PID/file rlimits, and `network_mode: none`. It has no published
+port, Docker socket, SSH material, application-data mount, service network, or
+egress route. Its sole writable mounts are the dedicated `/workspace` volume
+shared with the confined agent file tools and the private socket directory; the
+application sees the latter read-only and can connect but cannot replace its
+endpoint.
+
+`src/tool_execution.py` resolves agent file paths only under that workspace and
+rejects sensitive paths, symlink escapes, and extra host roots. If the executor
+is missing or rejects a command, the tool fails closed instead of launching a
+host process. Native deployments therefore need a separately configured
+executor for agent command tools; they do not regain host execution by default.
+
+Explicit Cookbook/operations routes remain high-trust administrative features.
+The optional `docker/host-docker.yml` overlay is the only supported way to
+mount a host Docker socket, and the tool-sandbox service never receives that
+mount. The executor API uses the private authenticated Unix socket rather than
+an IP network, so a model-controlled command cannot pivot from the sandbox into
+the application or other Compose services over Docker networking.
+
+## Outbound URL and Upload Boundaries
+
+- `/api/v1/chat` validates a configured public model endpoint, resolves its
+  approved IP address, pins the connection to that address, and disables
+  redirects. Existing sessions without the persisted outbound-URL policy fail
+  closed instead of silently using an old unchecked endpoint.
+- `UploadBodyLimitMiddleware` enforces per-route multipart byte caps while
+  reading the ASGI body, before Starlette can spool it. Routes also use bounded
+  multipart parser settings for fields/files/parts.
+
+## Build Integrity
+
+Docker base and service images are pinned by digest. The Docker CLI and the
+patched Real-ESRGAN source archives are checksum-verified before extraction.
+Committed Python lockfiles contain versions and SHA-256 hashes and Docker uses
+`pip --require-hashes`; `.in` files are the reviewable upgrade inputs.
 
 ## Security Headers
 
@@ -72,9 +116,18 @@ External content that reaches the LLM is treated as untrusted via `src/prompt_se
 
 These are open, acknowledged, and contributor help is welcome:
 
-1. **No shell/filesystem sandbox.** The agent `bash` and `read_file`/`write_file` tools run as the app process user with no network egress filtering or filesystem confinement. A successful prompt-injection reaching a shell-enabled admin session can make outbound requests to internal services. See #1058 for the sandbox proposal.
+1. **Container isolation is not a VM boundary.** The executor removes the app
+   process, host filesystem, socket, and egress paths from model-controlled
+   commands, but it still depends on a patched container runtime/kernel. Keep
+   Docker and the host OS maintained and do not treat a writable workspace as
+   confidential.
 
-2. **SSRF via `/api/v1/chat` `base_url` parameter.** A chat-scoped API token can supply an arbitrary `base_url`; the server forwards the LLM request to that host without validating the scheme or address. PR #1039 fixes this.
+2. **Explicit Cookbook host-management remains high trust.** It is disabled
+   unless `ODYSSEUS_ENABLE_HIGH_TRUST_COOKBOOK=true` is set. An administrator
+   who deliberately enables it can start local processes, run remote hardware
+   probes, and control configured SSH targets; adding `docker/host-docker.yml`
+   can additionally manage the host Docker daemon. These modes must only be
+   enabled for trusted operators.
 
 3. **`src/search/` partial consolidation.** `src.search.core` and `src.search.providers` correctly alias `services.search` via `sys.modules` replacement. `analytics`, `cache`, `content`, `query`, and `ranking` are still independent copies that can drift. The SSRF regression tests in `tests/test_webhook_ssrf_resilience.py` test `src.webhook_manager` directly (separate from search), so the safety net there is intact. See #1058.
 

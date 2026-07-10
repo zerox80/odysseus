@@ -131,8 +131,7 @@ if (-not (Test-Path $venvPy)) {
 
 # 3. Install / update dependencies
 Write-Step "Installing dependencies (first run can take a few minutes)"
-& $venvPy -m pip install --upgrade pip --quiet
-& $venvPy -m pip install -r requirements.txt
+& $venvPy -m pip install --require-hashes -r requirements.txt
 if ($LASTEXITCODE -ne 0) { Fail "Dependency install failed. Scroll up for the pip error." }
 
 # 4. First-time setup (creates data dirs, DB, .env, admin user)

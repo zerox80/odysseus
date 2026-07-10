@@ -1,7 +1,6 @@
 """edit_file: filesystem-write permission policy + behavior."""
 import json
 import os
-import tempfile
 
 import pytest
 
@@ -32,7 +31,7 @@ def test_blocked_tools_for_owner_includes_edit_file_for_non_admin(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_edit_file_blocked_at_execution_for_non_admin(monkeypatch):
+async def test_edit_file_blocked_at_execution_for_non_admin(monkeypatch, tmp_path):
     # Execution-level gate: a non-admin owner must be refused even if the tool
     # reaches execute_tool_block. edit_file stays admin-gated by tool_security
     # after #2684 (ALWAYS_AVAILABLE only changed advertisement, not execution).
@@ -44,48 +43,55 @@ async def test_edit_file_blocked_at_execution_for_non_admin(monkeypatch):
     # bypassing the admin gate.
     import src.tool_execution as te
     monkeypatch.setattr(te, "_owner_is_admin", lambda owner: False)
-    ws = tempfile.mkdtemp()
-    p = os.path.join("/tmp", "ef_block.txt")
-    open(p, "w").write("a\n")
+    root = tmp_path / "workspace"
+    root.mkdir()
+    monkeypatch.setenv("ODYSSEUS_AGENT_WORKSPACE_ROOT", str(root))
+    p = root / "ef_block.txt"
+    p.write_text("a\n")
     _desc, result = await te.execute_tool_block(
-        ToolBlock("edit_file", json.dumps({"path": p, "old_string": "a", "new_string": "b"})),
+        ToolBlock("edit_file", json.dumps({"path": str(p), "old_string": "a", "new_string": "b"})),
         owner="bob",
     )
     assert result.get("exit_code") == 1 and "admin" in result.get("error", "").lower()
-    os.unlink(p)
 
 
 # ── Behavior ──────────────────────────────────────────────────────────────
 @pytest.mark.asyncio
-async def test_edit_file_success():
-    p = os.path.join("/tmp", "ef_ok.py")
-    open(p, "w").write("def f():\n    return 1\n")
-    res = await EditFileTool().execute(json.dumps({"path": p, "old_string": "return 1", "new_string": "return 2"}), {})
+async def test_edit_file_success(monkeypatch, tmp_path):
+    root = tmp_path / "workspace"
+    root.mkdir()
+    monkeypatch.setenv("ODYSSEUS_AGENT_WORKSPACE_ROOT", str(root))
+    p = root / "ef_ok.py"
+    p.write_text("def f():\n    return 1\n")
+    res = await EditFileTool().execute(json.dumps({"path": str(p), "old_string": "return 1", "new_string": "return 2"}), {})
     assert res["exit_code"] == 0
-    assert open(p).read() == "def f():\n    return 2\n"
+    assert p.read_text() == "def f():\n    return 2\n"
     assert res["diff"]["added"] == 1 and res["diff"]["removed"] == 1 and res["diff"]["file"] == "ef_ok.py"
-    os.unlink(p)
 
 
 @pytest.mark.asyncio
-async def test_edit_file_not_found():
-    p = os.path.join("/tmp", "ef_nf.txt")
-    open(p, "w").write("hello\n")
-    res = await EditFileTool().execute(json.dumps({"path": p, "old_string": "nope", "new_string": "x"}), {})
+async def test_edit_file_not_found(monkeypatch, tmp_path):
+    root = tmp_path / "workspace"
+    root.mkdir()
+    monkeypatch.setenv("ODYSSEUS_AGENT_WORKSPACE_ROOT", str(root))
+    p = root / "ef_nf.txt"
+    p.write_text("hello\n")
+    res = await EditFileTool().execute(json.dumps({"path": str(p), "old_string": "nope", "new_string": "x"}), {})
     assert res["exit_code"] == 1 and "not found" in res["error"]
-    os.unlink(p)
 
 
 @pytest.mark.asyncio
-async def test_edit_file_non_unique():
-    p = os.path.join("/tmp", "ef_dup.txt")
-    open(p, "w").write("x\nx\n")
-    res = await EditFileTool().execute(json.dumps({"path": p, "old_string": "x", "new_string": "y"}), {})
+async def test_edit_file_non_unique(monkeypatch, tmp_path):
+    root = tmp_path / "workspace"
+    root.mkdir()
+    monkeypatch.setenv("ODYSSEUS_AGENT_WORKSPACE_ROOT", str(root))
+    p = root / "ef_dup.txt"
+    p.write_text("x\nx\n")
+    res = await EditFileTool().execute(json.dumps({"path": str(p), "old_string": "x", "new_string": "y"}), {})
     assert res["exit_code"] == 1 and "not unique" in res["error"]
     # replace_all resolves it
-    res = await EditFileTool().execute(json.dumps({"path": p, "old_string": "x", "new_string": "y", "replace_all": True}), {})
-    assert res["exit_code"] == 0 and open(p).read() == "y\ny\n"
-    os.unlink(p)
+    res = await EditFileTool().execute(json.dumps({"path": str(p), "old_string": "x", "new_string": "y", "replace_all": True}), {})
+    assert res["exit_code"] == 0 and p.read_text() == "y\ny\n"
 
 
 @pytest.mark.asyncio

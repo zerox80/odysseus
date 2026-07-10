@@ -23,9 +23,16 @@ pull request guidelines.
 git clone https://github.com/pewdiepie-archdaemon/odysseus.git
 cd odysseus
 cp .env.example .env       # optional, but recommended for explicit defaults
+# Generate a token, then paste it as ODYSSEUS_TOOL_SANDBOX_TOKEN=<value> in .env.
+# The isolated executor intentionally refuses to start without this shared secret.
+python -c "import secrets; print(secrets.token_urlsafe(32))"
 docker compose up -d --build
 ```
 To include optional extras in the image (PDF viewer, Office extraction; includes AGPL PyMuPDF), build with `docker compose build --build-arg INSTALL_OPTIONAL=true` before `up`.
+
+The Compose executor uses an authenticated private Unix socket rather than an
+IP network. It has no published port or outbound network route; do not replace
+this with an application-network executor endpoint.
 
 Open `http://localhost:7000` when the containers are healthy. Docker Compose
 binds the web UI to `127.0.0.1` by default. If the port is taken, set
@@ -42,14 +49,19 @@ git clone https://github.com/pewdiepie-archdaemon/odysseus.git
 cd odysseus
 python3 -m venv venv
 source venv/bin/activate
-pip install -r requirements.txt
+pip install --require-hashes -r requirements.txt
 python setup.py
 python -m uvicorn app:app --host 127.0.0.1 --port 7000
 ```
-Requirements: Python 3.11+. Cookbook also needs `tmux` for background model
+The committed lockfiles are generated and tested with Python 3.14; use that
+version for a reproducible native installation. Cookbook also needs `tmux` for background model
 downloads and serves. The app itself is lightweight; local model serving is the
 heavy part and depends on the model, runtime, GPU, and VRAM, so small hosts can
 connect to API or remote model servers instead. Use `--host 0.0.0.0` only when you intentionally want LAN/reverse-proxy access.
+
+The native app deliberately has no host-process fallback for agent `bash` or
+`python` tools. Use the Docker Compose deployment, or configure the documented
+isolated executor, when those tools are needed.
 
 ### Apple Silicon
 Docker on macOS cannot use the Metal GPU. For GPU-accelerated Cookbook on an
@@ -90,6 +102,20 @@ unless you opt in.
 (`~/.cache/huggingface` in the container). Cookbook-installed Python CLIs and
 serve engines live in `./data/local` (`~/.local` in the container), so they
 survive container recreation.
+
+**Cookbook host/SSH control (explicit opt-in).** The default deployment keeps
+agent command tools in the isolated executor and disables Cookbook operations
+that start or stop host processes, change packages, or contact configured SSH
+targets. If a fully trusted administrator needs those operations, set this in
+`.env` before recreating the service:
+
+```bash
+ODYSSEUS_ENABLE_HIGH_TRUST_COOKBOOK=true
+```
+
+This re-enables a deliberately high-trust administration capability; it is not
+a sandbox escape hatch and should remain off for exposed or tool-enabled
+sessions that may process untrusted content.
 
 **Remote servers.** In **Cookbook -> Settings -> Servers**, generate the
 Odysseus SSH key and add the public key to the remote server's
@@ -269,7 +295,7 @@ git clone https://github.com/pewdiepie-archdaemon/odysseus.git
 cd odysseus
 py -3.11 -m venv venv
 venv\Scripts\Activate.ps1
-pip install -r requirements.txt
+pip install --require-hashes -r requirements.txt
 python setup.py
 python -m uvicorn app:app --host 127.0.0.1 --port 7000
 ```
@@ -304,12 +330,14 @@ and configure everything else inside **Settings**.
 ## Troubleshooting & Advanced Setup
 
 ### `chromadb-client` conflicts with embedded ChromaDB
-If `chromadb-client` (the lightweight HTTP-only package) is installed alongside the full `chromadb` package, Odysseus starts but ChromaDB silently falls back to HTTP-only mode and fails.
+Odysseus intentionally uses the lightweight HTTP-only `chromadb-client` package
+to talk to the bundled ChromaDB service. Do not install the full `chromadb`
+package into the same environment; it conflicts with the client package.
 
-**Fix:** uninstall `chromadb-client` and force-reinstall the full package:
+**Fix:** remove the stray full package and restore the committed hash lock:
 ```bash
-./venv/bin/pip uninstall chromadb-client -y
-./venv/bin/pip install --force-reinstall chromadb
+./venv/bin/pip uninstall chromadb -y
+./venv/bin/pip install --require-hashes --force-reinstall -r requirements.txt
 ```
 
 ### HTTPS + LAN/Tailscale exposure
@@ -346,24 +374,36 @@ A grab-bag of small gotchas that otherwise turn into long debugging sessions.
 | `PyMuPDF` | PDF page rendering in the side viewer panel and form-filling. (Note: AGPL-3.0) |
 | `markitdown` | Office/EPUB document text extraction (converts .docx/.xlsx/.pptx/.xls/.epub to Markdown). |
 
-### Faster, reproducible installs with uv (optional)
-[uv](https://docs.astral.sh/uv/) works as a drop-in replacement for the
-venv + pip steps in the native install guides, no project changes are needed but this change results in faster installs along with a lockfile for reproducible environments. After [installing `uv`](https://docs.astral.sh/uv/getting-started/installation/), use:
+### Reproducible Python dependencies
+
+`requirements.in`, `requirements-optional.in`, and `requirements-portable.in`
+are human-maintained input manifests. The committed `requirements*.txt` files
+are Python 3.14 lockfiles with SHA-256 hashes. Normal installs must use the
+locks, which causes pip to reject a substituted or unreviewed package artifact:
 
 ```bash
-uv venv venv --python 3.13
-uv pip install -r requirements.txt
-# then continue as usual: python setup.py, uvicorn, ...
+pip install --require-hashes -r requirements.txt
+# Optional feature set: standalone lock containing the core graph too.
+pip install --require-hashes -r requirements-optional.txt
 ```
 
-`requirements.txt` is intentionally unpinned, so two installs at different times can produce different package versions. If you want a reproducible environment (e.g. across your own machines, or to roll back after a bad upgrade), snapshot and restore exact versions with:
+To take dependency upgrades deliberately, regenerate all locks on Python 3.14
+and review the resulting diff before committing it:
 
 ```bash
-uv pip compile requirements.txt -o requirements.lock   # snapshot current resolution
-uv pip sync requirements.lock                          # reproduce it exactly later
+python3.14 -m venv .lock-venv
+. .lock-venv/bin/activate
+pip install "pip==25.0.1" "pip-tools==7.5.2"
+pip-compile --generate-hashes --resolver=backtracking --strip-extras --output-file requirements.txt requirements.in
+pip-compile --allow-unsafe --generate-hashes --resolver=backtracking --strip-extras --output-file requirements-optional.txt requirements-optional.in
+pip-compile --allow-unsafe --generate-hashes --resolver=backtracking --strip-extras --output-file requirements-portable.txt requirements-portable.in
+pip-compile --generate-hashes --resolver=backtracking --strip-extras --output-file requirements-container.txt requirements-container.in
+pip-compile --allow-unsafe --generate-hashes --resolver=backtracking --strip-extras --output-file docker/realesrgan-build-requirements.txt docker/realesrgan-build-requirements.in
 ```
 
-`requirements.lock` is gitignored and platform-specific (compile it on the OS you deploy to). Regenerate it deliberately when you want to take upgrades. The plain `uv pip install -r requirements.txt` keeps following the unpinned requirements like pip does.
+[uv](https://docs.astral.sh/uv/) may still be used to create the virtualenv;
+install the committed locks with `uv pip install --require-hashes -r
+requirements.txt` rather than resolving the `.in` inputs during deployment.
 
 ### Outlook / Office 365 email
 Odysseus email accounts currently use IMAP/SMTP username-password auth. Outlook

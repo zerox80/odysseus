@@ -18,6 +18,7 @@ from src.upload_limits import (
     GALLERY_UPLOAD_MAX_BYTES,
     GALLERY_TRANSFORM_UPLOAD_MAX_BYTES,
 )
+from src.upload_body_limits import parse_limited_multipart_form
 from src.constants import GENERATED_IMAGES_DIR
 from src.optional_deps import patch_realesrgan_torchvision_compat
 
@@ -178,7 +179,7 @@ def setup_gallery_routes() -> APIRouter:
         import uuid
         from pathlib import Path
 
-        form = await request.form()
+        form = await parse_limited_multipart_form(request, max_files=1)
         file = form.get("file")
         if not file or not hasattr(file, 'filename'):
             raise HTTPException(400, "No file provided")
@@ -266,7 +267,7 @@ def setup_gallery_routes() -> APIRouter:
             if not user or img.owner != user:
                 raise HTTPException(403, "Not your image")
 
-            form = await request.form()
+            form = await parse_limited_multipart_form(request, max_files=1)
             file = form.get("image")
             if not file or not hasattr(file, 'read'):
                 raise HTTPException(400, "No image provided")
@@ -386,7 +387,7 @@ def setup_gallery_routes() -> APIRouter:
         import base64, httpx
 
         user = require_privilege(request, "can_generate_images")
-        form = await request.form()
+        form = await parse_limited_multipart_form(request, max_files=1)
         file = form.get("image")
         if not file: raise HTTPException(400, "No image")
         scale = int(form.get("scale", "2"))
@@ -430,7 +431,7 @@ def setup_gallery_routes() -> APIRouter:
         import base64, httpx
 
         user = require_privilege(request, "can_generate_images")
-        form = await request.form()
+        form = await parse_limited_multipart_form(request, max_files=1)
         file = form.get("image")
         prompt = form.get("prompt", "")
         strength = float(form.get("strength", "0.55"))

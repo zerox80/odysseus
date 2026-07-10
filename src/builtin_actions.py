@@ -12,7 +12,6 @@ from datetime import datetime
 from typing import Tuple
 
 from src.auth_helpers import owner_filter
-from core.platform_compat import IS_WINDOWS, find_bash
 from core.constants import internal_api_base
 from src.constants import DATA_DIR, DEEP_RESEARCH_DIR, TIDY_CALENDAR_STATE_FILE, EMAIL_URGENCY_CACHE_DIR, COOKBOOK_STATE_FILE
 from src.interactive_gate import wait_for_interactive_quiet
@@ -291,60 +290,58 @@ async def action_consolidate_memory(owner: str, **kwargs) -> Tuple[str, bool]:
 # Registry: action name -> async function(owner, **kwargs) -> (result_str, success_bool)
 
 
-async def _run_subprocess(argv, *, shell: bool = False, timeout: int = 120, label: str = "Command") -> Tuple[str, bool]:
-    """Shared subprocess runner. Wraps the blocking subprocess.run in
-    asyncio.to_thread so the event loop stays responsive."""
-    import asyncio
-    import subprocess
+async def _run_isolated_command(command: str, *, timeout: int = 120, label: str = "Command") -> Tuple[str, bool]:
+    """Run model-configurable task scripts only in the isolated sidecar."""
+    from src.sandbox_executor import SandboxExecutorUnavailable, execute_sandbox_command
+    from src.tool_execution import sandbox_workdir
+
+    safe_timeout = max(1, min(int(timeout), 120))
     try:
-        result = await asyncio.to_thread(
-            subprocess.run, argv, shell=shell, capture_output=True, text=True, timeout=timeout,
+        result = await execute_sandbox_command(
+            command,
+            timeout=safe_timeout,
+            workdir=sandbox_workdir(),
         )
-        output = (result.stdout or "").strip()
-        if result.returncode != 0 and result.stderr:
-            output += "\nSTDERR: " + result.stderr.strip()
-        return output or "(no output)", result.returncode == 0
-    except subprocess.TimeoutExpired:
-        return f"{label} timed out ({timeout}s)", False
-    except Exception as e:
-        return str(e), False
+    except (SandboxExecutorUnavailable, ValueError, RuntimeError) as exc:
+        return f"{label} isolated execution unavailable: {exc}", False
+
+    output = str(result.get("stdout", "")).strip()
+    stderr = str(result.get("stderr", "")).strip()
+    if stderr:
+        output = f"{output}\nSTDERR: {stderr}".strip()
+    if result.get("timed_out"):
+        return f"{output or '(no output)'}\n{label} timed out ({safe_timeout}s)", False
+    return output or "(no output)", result.get("exit_code") == 0
 
 
 async def action_ssh_command(owner: str, command: str = "", host: str = "localhost", **kwargs) -> Tuple[str, bool]:
-    """Run a shell command locally or on a remote host via SSH."""
+    """Run a local task script in the isolated executor.
+
+    Remote SSH is intentionally not available from the application process;
+    deployments that need it must use a narrowly scoped operations broker.
+    """
     if not command:
         return "No command specified", False
     if host in ("localhost", "127.0.0.1", "local"):
-        if IS_WINDOWS:
-            bash = find_bash()
-            if bash:
-                return await _run_subprocess([bash, "-c", command], timeout=120, label="Command")
-            return await _run_subprocess(command, shell=True, timeout=120, label="Command")
-        return await _run_subprocess(["bash", "-c", command], timeout=120, label="Command")
-    return await _run_subprocess(
-        ["ssh", "-o", "ConnectTimeout=10", host, command], timeout=120, label="Command",
-    )
+        return await _run_isolated_command(command, timeout=120, label="Command")
+    return "Remote SSH task actions are disabled; use a dedicated operations broker.", False
 
 
 async def action_run_script(owner: str, script: str = "", host: str = "", **kwargs) -> Tuple[str, bool]:
-    """Run a script locally, or via SSH when a host is configured."""
+    """Run a local script only in the isolated executor."""
     if not script:
         return "No script specified", False
     target_host = (host or os.getenv("ODYSSEUS_SCRIPT_HOST", "localhost")).strip()
     if target_host in ("", "localhost", "127.0.0.1", "local"):
-        if IS_WINDOWS and find_bash():
-            return await _run_subprocess([find_bash(), "-c", script], timeout=300, label="Script")
-        return await _run_subprocess(script, shell=True, timeout=300, label="Script")
-    return await _run_subprocess(["ssh", target_host, script], timeout=300, label="Script")
+        return await _run_isolated_command(script, timeout=120, label="Script")
+    return "Remote SSH task actions are disabled; use a dedicated operations broker.", False
 
 
 async def action_run_local(owner: str, script: str = "", **kwargs) -> Tuple[str, bool]:
-    """Run a script locally (no SSH)."""
+    """Run a script only in the isolated executor."""
     if not script:
         return "No script specified", False
-    if IS_WINDOWS and find_bash():
-        return await _run_subprocess([find_bash(), "-c", script], timeout=300, label="Script")
-    return await _run_subprocess(script, shell=True, timeout=300, label="Script")
+    return await _run_isolated_command(script, timeout=120, label="Script")
 
 
 async def action_tidy_research(owner: str, **kwargs) -> Tuple[str, bool]:

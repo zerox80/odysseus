@@ -473,6 +473,13 @@ if AUTH_ENABLED:
 else:
     logger.info("Auth middleware disabled (set AUTH_ENABLED=true to enable)")
 
+# Multipart files are parsed and potentially spooled before a FastAPI route
+# function runs.  Keep this outermost so known upload routes are rejected at
+# the ASGI receive boundary, before authentication or route dependency parsing
+# can consume the body.
+from src.upload_body_limits import UploadBodyLimitMiddleware
+app.add_middleware(UploadBodyLimitMiddleware)
+
 # ========= STATIC FILES =========
 os.makedirs(STATIC_DIR, exist_ok=True)
 

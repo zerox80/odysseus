@@ -1,5 +1,5 @@
 # routes/memory_routes.py
-from fastapi import APIRouter, Form, HTTPException, Request, UploadFile, File
+from fastapi import APIRouter, Form, HTTPException, Request
 from typing import Dict, Any, Optional, List
 import json
 import os
@@ -22,6 +22,7 @@ def _strip_list_prefix(text: str) -> str:
     return _LIST_PREFIX_RE.sub("", text, count=1).strip()
 
 from services.memory import MemoryManager
+from src.upload_body_limits import parse_limited_multipart_form, uploaded_values
 from core.session_manager import SessionManager
 from src.request_models import MemoryAddRequest
 from core.database import SessionLocal
@@ -323,10 +324,20 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
     @router.post("/import")
     async def import_memories_from_file(
         request: Request,
-        session: str | None = Form(None),
-        file: UploadFile = File(...)
+        session: str | None = None,
+        file: Any = None,
     ):
         """Extract memory suggestions from an uploaded file (PDF, TXT, MD, etc.)."""
+        if file is None:
+            form = await parse_limited_multipart_form(request, max_files=1)
+            uploads = uploaded_values(form, "file")
+            file = uploads[0] if len(uploads) == 1 else None
+            submitted_session = form.get("session")
+            if isinstance(submitted_session, str):
+                session = submitted_session
+        if not hasattr(file, "read"):
+            raise HTTPException(400, "No file uploaded")
+
         from src.auth_helpers import require_privilege
         require_privilege(request, "can_manage_memory")
 

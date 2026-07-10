@@ -108,17 +108,19 @@ python3 integrations/codex/scripts/odysseus_api.py POST /api/codex/memory '{"tex
 
 ## Cookbook serve (debug a failing model launch)
 
+Host-process and SSH inspection/control below is HIGH-TRUST and disabled unless `ODYSSEUS_ENABLE_HIGH_TRUST_COOKBOOK=true` is set by a trusted administrator. Never bypass that setting with shell, SSH, tmux, or another endpoint.
+
 The Cookbook surface lets you reproduce what a human would do in Odysseus → Cookbook: read which serves are running, tail their tmux output to see why they crashed, edit the launch command, relaunch, kill a stuck one. Use this when the user is debugging a model server that won't come up (compute-capability errors, OOM, missing kernels, wrong attention backend, etc.).
 
 - `GET /api/codex/cookbook/tasks` — list active serve/download/install tasks (sessionId, type, status, repo_id, remoteHost, payload._cmd). Requires `cookbook:read`.
 - `GET /api/codex/cookbook/servers` — list configured servers (name, host, port, env type + path, model dirs). Requires `cookbook:read`.
-- `GET /api/codex/cookbook/cached?host=<NAME>` — list models already cached on the named server (HF cache + Ollama + extra modelDirs). Call BEFORE `serve` to see what's already on disk. Requires `cookbook:read`.
+- `GET /api/codex/cookbook/cached?host=<NAME>` — HIGH-TRUST list of models already cached on the named server (HF cache + Ollama + extra modelDirs). Requires the opt-in above and `cookbook:read`.
 - `GET /api/codex/cookbook/presets` — list saved serve presets (model + host + port + cmd). The user's saved preset usually has a working cmd — try `preset NAME` before composing your own. Requires `cookbook:read`.
-- `GET /api/codex/cookbook/output/{session_id}?tail=400` — read the last N lines of the task's persistent log file (preferred) or tmux pane (fallback). The log file persists across vllm crashes, so this returns the actual Python traceback even after the bash prompt + neofetch banner overwrites the pane. Default tail=400. Requires `cookbook:read`.
-- `POST /api/codex/cookbook/serve` — launch a serve task. Body matches `ServeRequest`: `{ repo_id, cmd, remote_host?, ssh_port?, env_prefix?, gpus?, platform? }`. The `cmd` is validated: leading binary must be `vllm`/`python3`/`sglang`/`llama-server`/`ollama`/`node`/`npx`. NEVER prefix with `cd …`, `source …`, or chain with `&&`/`||`/`;`/`$(...)` — the validator rejects shell metacharacters. The venv activation (`env_prefix`) is added automatically from the host's saved settings, so pass the bare binary + args. Requires `cookbook:launch`.
-- `POST /api/codex/cookbook/preset/{name}` — launch a saved preset by name. Reuses the working cmd + host the user already saved. Requires `cookbook:launch`.
-- `POST /api/codex/cookbook/adopt` — register an externally-launched tmux session into cookbook tracking. Body: `{ tmux_session, model, host?, port? }`. Use this when serve_model rejected a cmd and you fell back to direct ssh+tmux — without adoption, the session is invisible to the UI. Requires `cookbook:launch`.
-- `POST /api/codex/cookbook/stop/{session_id}` — kill the tmux session. Requires `cookbook:launch`.
+- `GET /api/codex/cookbook/output/{session_id}?tail=400` — HIGH-TRUST read of the last N lines of the task's persistent log file (preferred) or tmux pane (fallback). Requires the opt-in above and `cookbook:read`.
+- `POST /api/codex/cookbook/serve` — HIGH-TRUST launch of a serve task. Body matches `ServeRequest`; requires the opt-in above and `cookbook:launch`.
+- `POST /api/codex/cookbook/preset/{name}` — HIGH-TRUST launch of a saved preset by name. Requires the opt-in above and `cookbook:launch`.
+- `POST /api/codex/cookbook/adopt` — register an existing administrator-launched tmux session into Cookbook tracking. Body: `{ tmux_session, model, host?, port? }`. This is a high-trust operation and is disabled unless `ODYSSEUS_ENABLE_HIGH_TRUST_COOKBOOK=true`; without adoption, the session is invisible to the UI. Requires `cookbook:launch`.
+- `POST /api/codex/cookbook/stop/{session_id}` — HIGH-TRUST stop of the tmux session. Requires the opt-in above and `cookbook:launch`.
 
 ```bash
 python3 ~/plugins/odysseus/scripts/odysseus_api.py cookbook tasks

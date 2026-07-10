@@ -1,5 +1,6 @@
 import pytest
-from fastapi import HTTPException
+from fastapi import FastAPI, HTTPException
+from fastapi.testclient import TestClient
 
 from core.platform_compat import _ssh_exec_argv
 from routes.hwfit_routes import setup_hwfit_routes
@@ -56,6 +57,46 @@ def test_hwfit_routes_reject_port_without_host():
         endpoint(host="", ssh_port="2222")
 
     assert exc.value.status_code == 400
+
+
+def test_remote_hwfit_probe_requires_explicit_opt_in_and_admin(monkeypatch):
+    import routes.hwfit_routes as hwfit_routes
+
+    monkeypatch.delenv("ODYSSEUS_ENABLE_HIGH_TRUST_COOKBOOK", raising=False)
+    with pytest.raises(HTTPException) as exc:
+        hwfit_routes._validate_detection_target("alice@gpu-box", "2222", object())
+    assert exc.value.status_code == 403
+    assert "ODYSSEUS_ENABLE_HIGH_TRUST_COOKBOOK=true" in str(exc.value.detail)
+
+    calls = []
+    request = object()
+    monkeypatch.setenv("ODYSSEUS_ENABLE_HIGH_TRUST_COOKBOOK", "true")
+    monkeypatch.setattr(hwfit_routes, "require_admin", lambda request: calls.append(request))
+    assert hwfit_routes._validate_detection_target("alice@gpu-box", "2222", request) == (
+        "alice@gpu-box",
+        "2222",
+    )
+    assert calls == [request]
+
+
+def test_remote_hwfit_probe_without_http_request_fails_closed(monkeypatch):
+    import routes.hwfit_routes as hwfit_routes
+
+    monkeypatch.setenv("ODYSSEUS_ENABLE_HIGH_TRUST_COOKBOOK", "true")
+    with pytest.raises(HTTPException) as exc:
+        hwfit_routes._validate_detection_target("gpu-box", "22")
+    assert exc.value.status_code == 403
+
+
+def test_remote_hwfit_endpoint_receives_request_and_fails_closed_by_default(monkeypatch):
+    monkeypatch.delenv("ODYSSEUS_ENABLE_HIGH_TRUST_COOKBOOK", raising=False)
+    app = FastAPI()
+    app.include_router(setup_hwfit_routes())
+
+    response = TestClient(app).get("/api/hwfit/system?host=gpu-box&ssh_port=22")
+
+    assert response.status_code == 403
+    assert "ODYSSEUS_ENABLE_HIGH_TRUST_COOKBOOK=true" in response.json()["detail"]
 
 
 def test_ssh_argv_rejects_option_shaped_remote():

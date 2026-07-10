@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field
 
 from core.database import SessionLocal, Webhook, ModelEndpoint
 from src.auth_helpers import owner_filter
-from src.url_security import validate_public_http_url
+from src.url_security import validate_public_http_url, validated_public_ips
 from src.webhook_manager import WebhookManager, validate_webhook_url, validate_events
 
 logger = logging.getLogger(__name__)
@@ -253,6 +253,7 @@ def setup_webhook_routes(
 
         session_id = body.session
         sess = None
+        pinned_ip = None
 
         # --- Case 1: Resume an existing session ---
         if session_id and session_manager:
@@ -276,6 +277,24 @@ def setup_webhook_routes(
             if not _caller_owns_session(_sess_owner, _tok_user):
                 raise HTTPException(404, "Session not found")
 
+            # A direct API-chat session persists its provenance. Resolve it
+            # again immediately before this request and pin the outbound
+            # connection to that approved public IP. Old API-chat sessions
+            # have no trustworthy provenance and are deliberately not resumed.
+            outbound_policy = getattr(sess, "outbound_url_policy", None)
+            if outbound_policy == "legacy-api-unknown" or (
+                outbound_policy is None and getattr(sess, "name", None) == "API Chat"
+            ):
+                raise HTTPException(
+                    409,
+                    "This legacy API Chat session cannot be resumed safely. Start a new session.",
+                )
+            if outbound_policy == "direct-public-pinned":
+                try:
+                    pinned_ip = validated_public_ips(sess.endpoint_url)[0]
+                except ValueError as e:
+                    raise HTTPException(400, str(e))
+
         # --- Case 2: Direct API key + model (no pre-configured endpoint needed) ---
         if not sess and body.api_key:
             api_key = body.api_key.strip()
@@ -298,6 +317,17 @@ def setup_webhook_routes(
                     "or provider ('deepseek', 'openai', 'groq', etc.)")
             base_url = normalize_base(base_url)
             endpoint_url = build_chat_url(base_url)
+            outbound_url_policy = "configured"
+            if direct_base_url:
+                # This is a second, just-in-time resolution of the final URL.
+                # llm_call_async receives this exact address and does not make
+                # an unpinned DNS lookup during its connect.
+                try:
+                    pinned_ip = validated_public_ips(endpoint_url)[0]
+                except ValueError as e:
+                    detail = str(e).replace("URL", "base_url", 1)
+                    raise HTTPException(400, detail)
+                outbound_url_policy = "direct-public-pinned"
 
             if not session_manager:
                 raise HTTPException(500, "Session manager not available")
@@ -306,6 +336,7 @@ def setup_webhook_routes(
             sess = session_manager.create_session(
                 session_id=sid, name="API Chat", endpoint_url=endpoint_url,
                 model=model, owner=token_owner,
+                outbound_url_policy=outbound_url_policy,
             )
             sess.headers = build_headers(api_key, base_url)
             session_manager.save_sessions()
@@ -367,6 +398,7 @@ def setup_webhook_routes(
             sess = session_manager.create_session(
                 session_id=sid, name="API Chat", endpoint_url=endpoint_url,
                 model=model, owner=token_owner,
+                outbound_url_policy="configured",
             )
             if api_key:
                 sess.headers = build_headers(api_key, base_url)
@@ -380,7 +412,7 @@ def setup_webhook_routes(
 
         reply = await llm_call_async(
             sess.endpoint_url, sess.model, messages,
-            headers=sess.headers, timeout=120,
+            headers=sess.headers, timeout=120, pinned_ip=pinned_ip,
         )
         sess.add_message(ChatMessage("assistant", reply))
         session_manager.save_sessions()

@@ -8,8 +8,6 @@ import os
 import re
 import shlex
 import shutil
-import subprocess
-import uuid
 import tempfile
 from collections import namedtuple
 from pathlib import Path
@@ -22,12 +20,16 @@ from src.host_docker_access import (
     running_in_container as _running_in_container,
 )
 from src.optional_deps import prepare_optional_dependency_import
+from src.sandbox_executor import SandboxExecutorUnavailable, execute_sandbox_command
+from src.high_trust_operations import (
+    HIGH_TRUST_COOKBOOK_HINT,
+    high_trust_cookbook_enabled,
+)
 
 # POSIX-only: `pty`/`fcntl` transitively import `termios`, which does NOT exist
 # on Windows, so importing them unconditionally crashed app startup there
 # (ModuleNotFoundError: termios — issues #140/#92/#63/#149/#150). The PTY code
-# path is only reachable on POSIX; Windows uses pipe streaming + a detached-job
-# fallback for the tmux feature (see _generate_win_detached).
+# path is retained only to give a clear compatibility error for PTY requests.
 try:
     import fcntl
     import pty
@@ -42,12 +44,7 @@ from fastapi import APIRouter, Request, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from core.platform_compat import (
-    IS_WINDOWS,
-    detached_popen_kwargs,
-    find_bash,
-    git_bash_path,
-)
+from core.platform_compat import IS_WINDOWS
 
 
 def _require_admin(request: Request):
@@ -284,7 +281,8 @@ def _prepend_user_install_bins_to_path() -> None:
         candidates = [os.path.join(site.USER_BASE, "bin")]
     except Exception:
         candidates = []
-    candidates.append(os.path.expanduser("~/.local/bin"))
+    home = os.environ.get("HOME") or str(Path.home())
+    candidates.append(os.path.join(home, ".local", "bin"))
 
     parts = (
         os.environ.get("PATH", "").split(os.pathsep) if os.environ.get("PATH") else []
@@ -396,6 +394,8 @@ def _find_line_break(buf):
 EXEC_TIMEOUT = 30  # seconds — shorter than agent's 60s
 STREAM_TIMEOUT = 120  # default for short commands
 MAX_OUTPUT = 200_000  # truncate limit
+# Cookbook keeps its own historical logs here.  This is not an executor
+# workdir; generic model-controlled commands never receive this host path.
 TMUX_LOG_DIR = Path(tempfile.gettempdir()) / "odysseus-tmux"
 PTY_UNSUPPORTED_ERROR = "pty_unsupported"
 
@@ -450,56 +450,29 @@ def _normalize_legacy_remote_tmux_exec(command: str) -> str:
     return shlex.join(repaired)
 
 
-async def _create_shell(command: str, **kwargs):
-    """Spawn a shell subprocess for `command`.
-
-    POSIX: /bin/sh via create_subprocess_shell (unchanged behaviour).
-    Windows: prefer a real bash (Git Bash/WSL) so bash-syntax commands behave
-    the same as on Linux; fall back to cmd.exe when no bash is installed.
-    Powershell commands are executed directly via cmd.exe /c to avoid quoting
-    and env variable expansion errors under Git Bash.
-    """
-    if IS_WINDOWS:
-        # PowerShell commands (used by the frontend for Windows log-file polling
-        # and session management) must run directly — passing them through
-        # bash -c mangles $env:VAR syntax and breaks the command.
-        cmd_trim = command.strip()
-        if cmd_trim.startswith("powershell") or cmd_trim.startswith("cmd "):
-            return await asyncio.create_subprocess_shell(command, **kwargs)
-        bash = find_bash()
-        if bash:
-            return await asyncio.create_subprocess_exec(bash, "-c", command, **kwargs)
-    return await asyncio.create_subprocess_shell(command, **kwargs)
-
-
 async def _exec_shell(command: str, timeout: int = EXEC_TIMEOUT) -> Dict[str, Any]:
-    """Run a shell command and return stdout/stderr/exit_code."""
-    proc = None
+    """Run a shell command only in the isolated tool-sandbox sidecar."""
     try:
-        proc = await _create_shell(
-            command,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=str(Path.home()),
-        )
-        stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-        stdout = stdout_b.decode(errors="replace")[:MAX_OUTPUT]
-        stderr = stderr_b.decode(errors="replace")[:MAX_OUTPUT]
-        return {"stdout": stdout, "stderr": stderr, "exit_code": proc.returncode}
-    except asyncio.TimeoutError:
-        if proc:
-            try:
-                proc.kill()
-                await proc.wait()
-            except ProcessLookupError:
-                pass
+        result = await execute_sandbox_command(command, timeout=timeout)
+        if result["timed_out"]:
+            return {
+                "stdout": result["stdout"],
+                "stderr": result["stderr"] or f"Command timed out after {timeout}s",
+                "exit_code": 124,
+            }
         return {
-            "stdout": "",
-            "stderr": f"Command timed out after {timeout}s",
-            "exit_code": -1,
+            "stdout": result["stdout"],
+            "stderr": result["stderr"],
+            "exit_code": result["exit_code"],
         }
-    except Exception as e:
-        return {"stdout": "", "stderr": str(e), "exit_code": -1}
+    except (SandboxExecutorUnavailable, ValueError) as exc:
+        return {"stdout": "", "stderr": str(exc), "exit_code": 125}
+
+
+def _require_high_trust_cookbook() -> None:
+    """Reject Cookbook host/SSH control unless an operator opted in."""
+    if not high_trust_cookbook_enabled():
+        raise HTTPException(403, HIGH_TRUST_COOKBOOK_HINT)
 
 
 async def _generate_pty(cmd: str, timeout: int, request: Request):
@@ -512,348 +485,9 @@ async def _generate_pty(cmd: str, timeout: int, request: Request):
         yield f"data: {json.dumps({'exit_code': -1, 'error': PTY_UNSUPPORTED_ERROR})}\n\n"
         return
 
-    loop = asyncio.get_running_loop()
-    master_fd, slave_fd = pty.openpty()
-
-    # Set master to non-blocking
-    flags = fcntl.fcntl(master_fd, fcntl.F_GETFL)
-    fcntl.fcntl(master_fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
-
-    proc = await asyncio.create_subprocess_shell(
-        cmd,
-        stdin=slave_fd,
-        stdout=slave_fd,
-        stderr=slave_fd,
-        cwd=str(Path.home()),
-        preexec_fn=os.setsid,
-    )
-    os.close(slave_fd)  # parent doesn't need the slave side
-
-    deadline = (loop.time() + timeout) if timeout else None
-    buf = b""
-    process_done = asyncio.Event()
-
-    async def _wait_proc():
-        await proc.wait()
-        process_done.set()
-
-    wait_task = asyncio.create_task(_wait_proc())
-
-    try:
-        while not process_done.is_set():
-            if deadline and loop.time() > deadline:
-                proc.kill()
-                await proc.wait()
-                yield f"data: {json.dumps({'stream': 'stderr', 'data': f'Command timed out after {timeout}s'})}\n\n"
-                yield f"data: {json.dumps({'exit_code': -1})}\n\n"
-                return
-
-            # Check client disconnect
-            if await request.is_disconnected():
-                proc.kill()
-                await proc.wait()
-                return
-
-            # Read available data from PTY
-            try:
-                chunk = await asyncio.wait_for(
-                    loop.run_in_executor(None, _pty_read, master_fd),
-                    timeout=2.0,
-                )
-            except asyncio.TimeoutError:
-                continue
-            except OSError:
-                break
-
-            if chunk is None:
-                # No data yet, keep waiting
-                continue
-            if chunk == b"":
-                # EOF — process closed the PTY
-                break
-
-            buf += chunk
-            # Split on \r or \n
-            while True:
-                idx, sep_len = _find_line_break(buf)
-                if idx == -1:
-                    break
-                line = buf[:idx].decode(errors="replace")
-                buf = buf[idx + sep_len :]
-                if line:
-                    yield f"data: {json.dumps({'stream': 'stdout', 'data': line})}\n\n"
-
-        # Drain any remaining PTY output after process exits
-        try:
-            while True:
-                rest = _pty_read(master_fd)
-                if rest is None or rest == b"":
-                    break
-                buf += rest
-        except OSError:
-            pass
-
-        # Flush remaining buffer
-        if buf:
-            # Split remaining buffer same as above
-            while True:
-                idx, sep_len = _find_line_break(buf)
-                if idx == -1:
-                    break
-                line = buf[:idx].decode(errors="replace")
-                buf = buf[idx + sep_len :]
-                if line:
-                    yield f"data: {json.dumps({'stream': 'stdout', 'data': line})}\n\n"
-            if buf:
-                text = buf.decode(errors="replace").strip()
-                if text:
-                    yield f"data: {json.dumps({'stream': 'stdout', 'data': text})}\n\n"
-
-        await wait_task
-        yield f"data: {json.dumps({'exit_code': proc.returncode})}\n\n"
-
-    except Exception as e:
-        try:
-            proc.kill()
-            await proc.wait()
-        except ProcessLookupError:
-            pass
-        yield f"data: {json.dumps({'stream': 'stderr', 'data': str(e)})}\n\n"
-        yield f"data: {json.dumps({'exit_code': -1})}\n\n"
-    finally:
-        wait_task.cancel()
-        try:
-            os.close(master_fd)
-        except OSError:
-            pass
-
-
-def _pty_read(fd: int) -> bytes | None:
-    """Blocking read from PTY fd. Called via run_in_executor.
-    Returns bytes on data, None on timeout (no data yet)."""
-    import select
-
-    r, _, _ = select.select([fd], [], [], 1.0)
-    if r:
-        try:
-            data = os.read(fd, 4096)
-            return data if data else b""  # empty = EOF
-        except OSError:
-            return b""  # fd closed = EOF
-    return None  # timeout, no data yet
-
-
-async def _generate_tmux(cmd: str, request: Request):
-    """Run command in a tmux session. Streams output via a log file.
-    The tmux session survives browser disconnect — user can reconnect or
-    `tmux attach -t <name>` to see it live."""
-    TMUX_LOG_DIR.mkdir(parents=True, exist_ok=True)
-    session_id = f"cookbook-{uuid.uuid4().hex[:8]}"
-    log_path = TMUX_LOG_DIR / f"{session_id}.log"
-
-    # Write a wrapper script that runs the command, tees output, and records exit code.
-    # Using a script avoids shell quoting issues with the tmux command.
-    script_path = TMUX_LOG_DIR / f"{session_id}.sh"
-    script_path.write_text(
-        f"#!/bin/bash\n"
-        f'ODYSSEUS_USER_SHELL="${{SHELL:-}}"\n'
-        f'if [ -n "$ODYSSEUS_USER_SHELL" ] && [ -x "$ODYSSEUS_USER_SHELL" ]; then\n'
-        f'  ODYSSEUS_USER_PATH="$("$ODYSSEUS_USER_SHELL" -ic \'printf "__ODYSSEUS_PATH__%s\\n" "$PATH"\' 2>/dev/null | sed -n \'s/^__ODYSSEUS_PATH__//p\' | tail -n 1 || true)"\n'
-        f'  if [ -n "$ODYSSEUS_USER_PATH" ]; then export PATH="$ODYSSEUS_USER_PATH:$PATH"; fi\n'
-        f"fi\n"
-        f"{cmd} 2>&1 | tee '{log_path}'\n"
-        f"EC=${{PIPESTATUS[0]}}\n"
-        f"echo ':::EXIT_CODE:::'$EC >> '{log_path}'\n"
-        f"rm -f '{script_path}'\n"
-        f"exit $EC\n",
-        encoding="utf-8",
-    )
-    script_path.chmod(0o755)
-    logger.info(
-        "tmux wrapper script created: session=%s path=%s", session_id, script_path
-    )
-
-    tmux_cmd = f"tmux new-session -d -s {session_id} {shlex.quote(str(script_path))}"
-
-    proc = await asyncio.create_subprocess_shell(
-        tmux_cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    await proc.wait()
-    if proc.returncode != 0:
-        stderr = (await proc.stderr.read()).decode(errors="replace")
-        yield f"data: {json.dumps({'stream': 'stderr', 'data': f'Failed to start tmux: {stderr}'})}\n\n"
-        yield f"data: {json.dumps({'exit_code': -1})}\n\n"
-        return
-
-    yield f"data: {json.dumps({'stream': 'stdout', 'data': f'Started tmux session: {session_id}'})}\n\n"
-
-    # Tail the log file, streaming new lines as SSE
-    lines_sent = 0
-    exit_code = None
-
-    while True:
-        # Check client disconnect
-        if await request.is_disconnected():
-            # tmux keeps running — that's the whole point
-            yield f"data: {json.dumps({'stream': 'stdout', 'data': f'Disconnected. tmux session {session_id} continues in background.'})}\n\n"
-            return
-
-        # Read new lines from log
-        try:
-            if log_path.exists():
-                lines = log_path.read_text(
-                    encoding="utf-8", errors="replace"
-                ).splitlines()
-                new_lines = lines[lines_sent:]
-                for line in new_lines:
-                    if line.startswith(":::EXIT_CODE:::"):
-                        try:
-                            exit_code = int(line.split(":::")[-1])
-                        except ValueError:
-                            exit_code = -1
-                    else:
-                        yield f"data: {json.dumps({'stream': 'stdout', 'data': line})}\n\n"
-                lines_sent = len(lines)
-        except Exception as e:
-            logger.debug(f"tmux log read error: {e}")
-
-        if exit_code is not None:
-            break
-
-        # Check if tmux session is still alive
-        check = await asyncio.create_subprocess_shell(
-            f"tmux has-session -t {session_id} 2>/dev/null",
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
-        await check.wait()
-        if check.returncode != 0:
-            # Session ended — do one final read
-            await asyncio.sleep(0.5)
-            if log_path.exists():
-                lines = log_path.read_text(
-                    encoding="utf-8", errors="replace"
-                ).splitlines()
-                for line in lines[lines_sent:]:
-                    if line.startswith(":::EXIT_CODE:::"):
-                        try:
-                            exit_code = int(line.split(":::")[-1])
-                        except ValueError:
-                            exit_code = -1
-                    else:
-                        yield f"data: {json.dumps({'stream': 'stdout', 'data': line})}\n\n"
-            if exit_code is None:
-                exit_code = 0
-            break
-
-        await asyncio.sleep(1.0)
-
-    yield f"data: {json.dumps({'exit_code': exit_code})}\n\n"
-
-    # Clean up log file
-    try:
-        log_path.unlink(missing_ok=True)
-    except Exception:
-        pass
-
-
-async def _generate_win_detached(cmd: str, request: Request):
-    """Windows stand-in for the tmux path (issues #84/#162).
-
-    tmux doesn't exist on Windows, so we run the command in a *detached* child
-    (DETACHED_PROCESS — survives browser disconnect, same as the tmux session)
-    that writes output to a log file, and tail that log over SSE. Prefers bash
-    (Git Bash) for command-syntax parity; falls back to cmd.exe. There's no
-    `tmux attach` equivalent, but the "keeps running if you disconnect" contract
-    holds, which is the point of the feature for long Cookbook downloads."""
-    TMUX_LOG_DIR.mkdir(parents=True, exist_ok=True)
-    session_id = f"cookbook-{uuid.uuid4().hex[:8]}"
-    log_path = TMUX_LOG_DIR / f"{session_id}.log"
-    exit_path = TMUX_LOG_DIR / f"{session_id}.exit"
-
-    bash = find_bash()
-    if bash:
-        script_path = TMUX_LOG_DIR / f"{session_id}.sh"
-        script_path.write_text(
-            f"{cmd} > {shlex.quote(git_bash_path(log_path))} 2>&1\n"
-            f"echo $? > {shlex.quote(git_bash_path(exit_path))}\n",
-            encoding="utf-8",
-        )
-        argv = [bash, str(script_path)]
-    else:
-        script_path = TMUX_LOG_DIR / f"{session_id}.cmd"
-        # cmd.exe wrapper: run, redirect all output to the log, record exit code.
-        script_path.write_text(
-            "@echo off\r\n"
-            f'call {cmd} > "{log_path}" 2>&1\r\n'
-            f'echo %ERRORLEVEL%> "{exit_path}"\r\n',
-            encoding="utf-8",
-        )
-        argv = [os.environ.get("ComSpec", "cmd.exe"), "/c", str(script_path)]
-
-    try:
-        subprocess.Popen(
-            argv,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            stdin=subprocess.DEVNULL,
-            **detached_popen_kwargs(),
-        )
-    except Exception as e:
-        yield f"data: {json.dumps({'stream': 'stderr', 'data': f'Failed to launch background job: {e}'})}\n\n"
-        yield f"data: {json.dumps({'exit_code': -1})}\n\n"
-        return
-
-    yield f"data: {json.dumps({'stream': 'stdout', 'data': f'Started background job: {session_id}'})}\n\n"
-
-    lines_sent = 0
-    exit_code = None
-    while True:
-        if await request.is_disconnected():
-            yield f"data: {json.dumps({'stream': 'stdout', 'data': f'Disconnected. Background job {session_id} continues running.'})}\n\n"
-            return
-        try:
-            if log_path.exists():
-                lines = log_path.read_text(
-                    encoding="utf-8", errors="replace"
-                ).splitlines()
-                for line in lines[lines_sent:]:
-                    yield f"data: {json.dumps({'stream': 'stdout', 'data': line})}\n\n"
-                lines_sent = len(lines)
-        except Exception as e:
-            logger.debug("win detached log read error: %s", e)
-
-        if exit_path.exists():
-            # Drain any final lines, then read the recorded exit code.
-            await asyncio.sleep(0.3)
-            try:
-                if log_path.exists():
-                    lines = log_path.read_text(
-                        encoding="utf-8", errors="replace"
-                    ).splitlines()
-                    for line in lines[lines_sent:]:
-                        yield f"data: {json.dumps({'stream': 'stdout', 'data': line})}\n\n"
-                    lines_sent = len(lines)
-                exit_code = int(
-                    (
-                        exit_path.read_text(encoding="utf-8", errors="replace").strip()
-                        or "0"
-                    )
-                )
-            except Exception:
-                exit_code = 0
-            break
-        await asyncio.sleep(1.0)
-
-    yield f"data: {json.dumps({'exit_code': exit_code})}\n\n"
-    for p in (log_path, exit_path, script_path):
-        try:
-            p.unlink(missing_ok=True)
-        except Exception:
-            pass
-
+    yield f"data: {json.dumps({'stream': 'stderr', 'data': 'PTY execution is unavailable in the isolated executor', 'error': 'sandbox_interactive_unsupported'})}\n\n"
+    yield f"data: {json.dumps({'exit_code': 125, 'error': 'sandbox_interactive_unsupported'})}\n\n"
+    return
 
 def setup_shell_routes() -> APIRouter:
     router = APIRouter(tags=["shell"])
@@ -900,115 +534,22 @@ def setup_shell_routes() -> APIRouter:
             len(cmd),
         )
 
-        if use_tmux:
-            # tmux is POSIX-only; Windows uses a detached-process + logfile tail
-            # that preserves the "survives disconnect" behaviour.
-            gen = (
-                _generate_win_detached(cmd, request)
-                if IS_WINDOWS
-                else _generate_tmux(cmd, request)
-            )
-            return StreamingResponse(gen, media_type="text/event-stream")
+        async def generate_isolated():
+            if use_tmux or use_pty:
+                yield f"data: {json.dumps({'stream': 'stderr', 'data': 'Interactive PTY/tmux execution is unavailable in the isolated executor', 'error': 'sandbox_interactive_unsupported'})}\n\n"
+                yield f"data: {json.dumps({'exit_code': 125, 'error': 'sandbox_interactive_unsupported'})}\n\n"
+                return
+            # A sidecar response is bounded and returned atomically.  Preserve
+            # the SSE wire format while deliberately avoiding host pipe/PTY
+            # processes and detached sessions.
+            result = await _exec_shell(cmd, timeout=timeout or STREAM_TIMEOUT)
+            for line in result["stdout"].splitlines():
+                yield f"data: {json.dumps({'stream': 'stdout', 'data': line})}\n\n"
+            for line in result["stderr"].splitlines():
+                yield f"data: {json.dumps({'stream': 'stderr', 'data': line})}\n\n"
+            yield f"data: {json.dumps({'exit_code': result['exit_code']})}\n\n"
 
-        if use_pty and not IS_WINDOWS:
-            return StreamingResponse(
-                _generate_pty(cmd, timeout, request),
-                media_type="text/event-stream",
-            )
-        # Windows has no PTY; fall through to pipe streaming below (output still
-        # streams line-by-line, just without live in-place progress-bar redraws).
-
-        async def generate():
-            proc = None
-            reader_tasks = []
-            try:
-                proc = await _create_shell(
-                    cmd,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                    cwd=str(Path.home()),
-                )
-
-                q: asyncio.Queue = asyncio.Queue()
-
-                async def _reader(stream, name):
-                    """Read chunks, split on \\n or \\r for progress bar support."""
-                    try:
-                        buf = b""
-                        while True:
-                            chunk = await stream.read(4096)
-                            if not chunk:
-                                if buf:
-                                    await q.put(
-                                        (
-                                            name,
-                                            buf.decode(errors="replace").rstrip("\r\n"),
-                                        )
-                                    )
-                                break
-                            buf += chunk
-                            while True:
-                                idx, sep_len = _find_line_break(buf)
-                                if idx == -1:
-                                    break
-                                line = buf[:idx].decode(errors="replace")
-                                buf = buf[idx + sep_len :]
-                                if line:
-                                    await q.put((name, line))
-                    finally:
-                        await q.put((name, None))
-
-                reader_tasks = [
-                    asyncio.create_task(_reader(proc.stdout, "stdout")),
-                    asyncio.create_task(_reader(proc.stderr, "stderr")),
-                ]
-
-                finished = 0
-                loop = asyncio.get_running_loop()
-                deadline = (loop.time() + timeout) if timeout else None
-                while finished < 2:
-                    if deadline:
-                        remaining = deadline - loop.time()
-                        if remaining <= 0:
-                            raise asyncio.TimeoutError()
-                        wait = min(remaining, 2.0)
-                    else:
-                        wait = 2.0
-
-                    try:
-                        name, text = await asyncio.wait_for(q.get(), timeout=wait)
-                    except asyncio.TimeoutError:
-                        if await request.is_disconnected():
-                            if proc:
-                                proc.kill()
-                            return
-                        continue
-
-                    if text is None:
-                        finished += 1
-                        continue
-                    yield f"data: {json.dumps({'stream': name, 'data': text})}\n\n"
-
-                await proc.wait()
-                yield f"data: {json.dumps({'exit_code': proc.returncode})}\n\n"
-
-            except asyncio.TimeoutError:
-                if proc:
-                    try:
-                        proc.kill()
-                        await proc.wait()
-                    except ProcessLookupError:
-                        pass
-                yield f"data: {json.dumps({'stream': 'stderr', 'data': f'Command timed out after {timeout}s'})}\n\n"
-                yield f"data: {json.dumps({'exit_code': -1})}\n\n"
-            except Exception as e:
-                yield f"data: {json.dumps({'stream': 'stderr', 'data': str(e)})}\n\n"
-                yield f"data: {json.dumps({'exit_code': -1})}\n\n"
-            finally:
-                for t in reader_tasks:
-                    t.cancel()
-
-        return StreamingResponse(generate(), media_type="text/event-stream")
+        return StreamingResponse(generate_isolated(), media_type="text/event-stream")
 
     def _os_id_from_release(text: str) -> str:
         """Map /etc/os-release contents to a canonical family for our matrix."""
@@ -1098,6 +639,7 @@ def setup_shell_routes() -> APIRouter:
         """
         _require_admin(request)
         _reject_cross_site(request)
+        _require_high_trust_cookbook()
         import importlib.metadata as importlib_metadata
         import shlex
         import json as _json
@@ -1574,6 +1116,7 @@ def setup_shell_routes() -> APIRouter:
     async def install_package(request: Request):
         """Install a package via pip. Admin only — pip install is effectively code exec."""
         _require_admin(request)
+        _require_high_trust_cookbook()
         import sys as _sys
 
         body = await request.json()
@@ -1625,6 +1168,7 @@ def setup_shell_routes() -> APIRouter:
         sudo is required.
         """
         _require_admin(request)
+        _require_high_trust_cookbook()
         body = await request.json()
         raw = body.get("packages") or []
         host = (body.get("remote_host") or "").strip()
@@ -1746,6 +1290,7 @@ def setup_shell_routes() -> APIRouter:
         stuck on a CPU-only llama-server.
         """
         _require_admin(request)
+        _require_high_trust_cookbook()
         from routes.cookbook_helpers import _llama_cpp_rebuild_cmd
 
         body = await request.json()

@@ -116,10 +116,9 @@ async def test_stop_served_model_uses_validated_remote_target(monkeypatch):
 
     assert result["exit_code"] == 0
     assert len(posts) == 1
-    command = posts[0][1]["command"]
-    assert "ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no" in command
-    assert "-p 2222 user@gpu-box" in command
-    assert "tmux kill-session -t serve-abc123" in command
+    url, payload, _ = posts[0]
+    assert url.endswith("/api/codex/cookbook/stop/serve-abc123")
+    assert payload == {"remote_host": "user@gpu-box", "ssh_port": "2222"}
 
 
 @pytest.mark.asyncio
@@ -213,3 +212,56 @@ async def test_adopt_served_model_rejects_invalid_remote_host_before_shell(monke
     assert result["exit_code"] == 1
     assert "Invalid remote_host" in result["error"]
     assert posts == []
+
+
+@pytest.mark.asyncio
+async def test_adopt_served_model_uses_dedicated_high_trust_endpoint(monkeypatch):
+    import httpx
+
+    posts = []
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, *_args, **_kwargs):
+            pytest.fail("adoption state must be written only by the dedicated endpoint")
+
+        async def post(self, url, json=None, **kwargs):
+            posts.append((url, json, kwargs))
+            return FakeResponse({"ok": True, "already_tracked": False})
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
+
+    result = await tools.do_adopt_served_model(
+        json.dumps(
+            {
+                "tmux_session": "serve_abc123",
+                "model": "org/model",
+                "host": "user@gpu-box",
+                "ssh_port": 2222,
+                "port": 8001,
+                "name": "Example",
+                "add_endpoint": False,
+            }
+        )
+    )
+
+    assert result["exit_code"] == 0
+    assert len(posts) == 1
+    url, payload, _ = posts[0]
+    assert url.endswith("/api/codex/cookbook/adopt")
+    assert payload == {
+        "tmux_session": "serve_abc123",
+        "model": "org/model",
+        "host": "user@gpu-box",
+        "ssh_port": "2222",
+        "port": 8001,
+        "name": "Example",
+    }

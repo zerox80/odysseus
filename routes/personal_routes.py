@@ -5,7 +5,7 @@ import logging
 import shutil
 import uuid
 from typing import Any, Dict, List, Tuple
-from fastapi import APIRouter, HTTPException, Query, Request, UploadFile, File, Depends
+from fastapi import APIRouter, HTTPException, Query, Request, Depends
 from src.request_models import DirectoryRequest
 from core.constants import BASE_DIR, PERSONAL_DIR, PERSONAL_UPLOADS_DIR
 from src.rag_singleton import get_rag_manager
@@ -13,6 +13,11 @@ from src.auth_helpers import require_privilege, require_user
 from core.middleware import require_admin
 from src.upload_handler import secure_filename
 from src.upload_limits import PERSONAL_UPLOAD_MAX_BYTES
+from src.upload_body_limits import (
+    MAX_PERSONAL_UPLOAD_FILES,
+    parse_limited_multipart_form,
+    uploaded_values,
+)
 
 UPLOADS_DIR = PERSONAL_UPLOADS_DIR
 
@@ -276,8 +281,18 @@ def setup_personal_routes(personal_docs_manager, rag_manager, rag_available):
             raise HTTPException(500, f"Failed to remove directory: {str(e)}")
     
     @router.post("/upload")
-    async def upload_files_to_rag(request: Request, files: List[UploadFile] = File(...)):
+    async def upload_files_to_rag(request: Request, files: List[Any] | None = None):
         """Upload files directly into RAG. Supports text and PDF."""
+        if files is None:
+            form = await parse_limited_multipart_form(
+                request, max_files=MAX_PERSONAL_UPLOAD_FILES
+            )
+            files = uploaded_values(form, "files")
+        elif not isinstance(files, list):
+            files = [files]
+        if not files or any(not hasattr(upload, "read") for upload in files):
+            raise HTTPException(400, "No files uploaded")
+
         user = require_privilege(request, "can_use_documents")
         rag = _rag()
         if not rag:

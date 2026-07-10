@@ -7,16 +7,13 @@ Covers:
   - Relative traversal (~/../../etc/passwd) — blocked
   - Shell rc files (.bashrc, .zshrc, .profile) — blocked
   - SSH key filenames (id_rsa, id_ed25519) — blocked regardless of dir
-  - Legitimate paths under project data/ and /tmp — allowed
-  - Extra roots via tool_path_extra_roots setting — opt-in
-  - Even with $HOME as extra root, sensitive subpaths stay blocked
+  - Legitimate paths under the dedicated workspace mount — allowed
+  - Host temp and settings-provided extra roots — rejected
 """
 
 import os
 import sys
 from types import SimpleNamespace
-from unittest.mock import patch
-
 import pytest
 
 
@@ -161,28 +158,28 @@ def test_blocks_netrc():
         _resolve_tool_path("~/.netrc")
 
 
-def test_allows_project_data(tmp_path):
-    """Paths under project data/ must resolve cleanly."""
+def test_allows_dedicated_workspace(tmp_path, monkeypatch):
+    """Paths below the dedicated workspace root resolve cleanly."""
     from src.tool_execution import _resolve_tool_path
-    from src.constants import DATA_DIR
-    target = os.path.join(DATA_DIR, "test-confinement-ok.txt")
-    os.makedirs(DATA_DIR, exist_ok=True)
-    with open(target, "w") as f:
-        f.write("ok")
-    try:
-        resolved = _resolve_tool_path(target)
-        assert resolved == os.path.realpath(target)
-    finally:
-        os.unlink(target)
+    root = tmp_path / "workspace"
+    root.mkdir()
+    target = root / "test-confinement-ok.txt"
+    target.write_text("ok")
+    monkeypatch.setenv("ODYSSEUS_AGENT_WORKSPACE_ROOT", str(root))
+    assert _resolve_tool_path(str(target)) == os.path.realpath(str(target))
 
 
-def test_allows_tmp(tmp_path):
-    """Paths under /tmp (or its realpath) must resolve cleanly."""
+def test_rejects_host_tmp(tmp_path, monkeypatch):
+    """A host temp directory is not an agent-visible filesystem root."""
     from src.tool_execution import _resolve_tool_path
-    f = tmp_path / "confinement-test.txt"
-    f.write_text("ok")
-    resolved = _resolve_tool_path(str(f))
-    assert resolved == os.path.realpath(str(f))
+    root = tmp_path / "workspace"
+    root.mkdir()
+    monkeypatch.setenv("ODYSSEUS_AGENT_WORKSPACE_ROOT", str(root))
+    outside = tmp_path / "host-tmp" / "confinement-test.txt"
+    outside.parent.mkdir()
+    outside.write_text("ok")
+    with pytest.raises(ValueError, match="outside the allowed roots"):
+        _resolve_tool_path(str(outside))
 
 
 def test_rejects_empty_path():
@@ -193,28 +190,19 @@ def test_rejects_empty_path():
         _resolve_tool_path("   ")
 
 
-def test_extra_roots_opt_in(tmp_path):
-    """When tool_path_extra_roots includes a directory, paths under it
-    are allowed (but sensitive subpaths are still blocked)."""
+def test_settings_extra_roots_cannot_expand_workspace(tmp_path, monkeypatch):
+    """The legacy setting must not reopen host filesystem access."""
     from src.tool_execution import _resolve_tool_path
+    root = tmp_path / "workspace"
+    root.mkdir()
+    monkeypatch.setenv("ODYSSEUS_AGENT_WORKSPACE_ROOT", str(root))
     extra_dir = tmp_path / "extra_root"
     extra_dir.mkdir()
     target = extra_dir / "file.txt"
     target.write_text("ok")
 
-    with patch("src.settings.get_setting", return_value=[str(extra_dir)]):
-        resolved = _resolve_tool_path(str(target))
-        assert resolved == os.path.realpath(str(target))
-
-
-def test_extra_root_still_blocks_sensitive(tmp_path):
-    """Even when $HOME is in tool_path_extra_roots, ~/.ssh/authorized_keys
-    must still be rejected by the sensitive-subpath deny list."""
-    from src.tool_execution import _resolve_tool_path
-    home = os.path.expanduser("~")
-    with patch("src.settings.get_setting", return_value=[home]):
-        with pytest.raises(ValueError, match="sensitive directory"):
-            _resolve_tool_path("~/.ssh/authorized_keys")
+    with pytest.raises(ValueError, match="outside the allowed roots"):
+        _resolve_tool_path(str(target))
 
 
 # ── Integration: dispatch-level tests ────────────────────────────────

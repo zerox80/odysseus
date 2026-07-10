@@ -1,42 +1,19 @@
-"""Background job execution for the agent's `bash` tool.
+"""Read and clean up historical detached-job records.
 
-Long commands (installs, ffmpeg, model downloads) should NOT block the chat
-stream — a multi-minute held SSE connection is fragile (model-stops-early,
-timeouts, tab suspend). Instead we launch them **detached** and let an
-always-on monitor re-invoke the agent when they finish ("auto-continue").
-
-Design goals:
-  * Restart-safe: status is derived from an on-disk exit-code file, not a live
-    PID, so a uvicorn restart never loses a job or its result.
-  * Idempotent follow-up: a job stays {done, followed_up: False} until the
-    agent has actually been re-invoked, so completion can never silently
-    "do nothing" — the monitor retries on the next tick.
-  * Bounded: a hard max-runtime marks a runaway job failed and STILL triggers
-    a follow-up ("timed out"), so you always hear back.
-
-This module only owns launch + state. The monitor / agent re-invocation lives
-in the caller (so this stays import-light and unit-testable).
+New agent commands cannot launch background processes: generic command
+execution is bounded by the isolated executor. The retained state helpers let
+operators inspect or stop legacy records without reviving host-process launch.
 """
 
 from __future__ import annotations
 
 import json
-import os
-import shlex
-import subprocess
 import time
-import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from core.atomic_io import atomic_write_json
-from core.platform_compat import (
-    detached_popen_kwargs,
-    find_bash,
-    git_bash_path,
-    kill_process_tree,
-    pid_alive,
-)
+from core.platform_compat import kill_process_tree, pid_alive
 
 from src.constants import BG_JOBS_DIR, BG_JOBS_FILE
 
@@ -80,83 +57,15 @@ def _pid_alive(pid: Optional[int]) -> bool:
 
 def launch(command: str, session_id: str, cwd: Optional[str] = None,
            max_runtime_s: int = DEFAULT_MAX_RUNTIME_S) -> Dict[str, Any]:
-    """Launch `command` detached. Returns the job record (status='running').
-
-    Output + the final exit code are written to files so status survives a
-    server restart. The process is put in its own session (setsid) so it
-    outlives the request/stream that started it.
-    """
-    _JOBS_DIR.mkdir(parents=True, exist_ok=True)
-    job_id = uuid.uuid4().hex[:12]
-    log_path = _JOBS_DIR / f"{job_id}.log"
-    exit_path = _JOBS_DIR / f"{job_id}.exit"
-
-    # The user command goes in its OWN script file, run as a child `bash`. This
-    # is what isolates it: an `exit` inside it only ends that child (so the
-    # wrapper still records the exit code), and — unlike textually wrapping the
-    # command in `( … )` — the wrapper can't be broken by an unbalanced paren or
-    # a trailing line-continuation in the command. `$?` is the child's real
-    # exit status.
-    bash = find_bash()
-    if bash:
-        # POSIX, or Windows with Git Bash/WSL. The user command goes in its OWN
-        # script file, run as a child `bash` — an `exit` inside it only ends
-        # that child (so the wrapper still records the exit code), and an
-        # unbalanced paren / trailing line-continuation in the command can't
-        # break the wrapper. `$?` is the child's real exit status. Paths are
-        # emitted as POSIX (forward-slash) + shell-quoted so Git Bash on Windows
-        # handles drive paths and spaces correctly.
-        cmd_path = _JOBS_DIR / f"{job_id}.cmd.sh"
-        cmd_path.write_text(command + "\n", encoding="utf-8")
-        lp, xp, cp = (shlex.quote(git_bash_path(p)) for p in (log_path, exit_path, cmd_path))
-        script_path = _JOBS_DIR / f"{job_id}.sh"
-        script_path.write_text(
-            f"bash {cp} > {lp} 2>&1\n"
-            f"echo $? > {xp}\n",
-            encoding="utf-8",
-        )
-        argv = [bash, str(script_path)]
-    else:
-        # Windows without any bash installed: cmd.exe wrapper. The command runs
-        # in its own child .cmd so %ERRORLEVEL% is the command's real exit code.
-        child_path = _JOBS_DIR / f"{job_id}.child.cmd"
-        child_path.write_text("@echo off\r\n" + command + "\r\n", encoding="utf-8")
-        script_path = _JOBS_DIR / f"{job_id}.cmd"
-        script_path.write_text(
-            "@echo off\r\n"
-            f'call "{child_path}" > "{log_path}" 2>&1\r\n'
-            f'echo %ERRORLEVEL%> "{exit_path}"\r\n',
-            encoding="utf-8",
-        )
-        argv = [os.environ.get("ComSpec", "cmd.exe"), "/c", str(script_path)]
-
-    proc = subprocess.Popen(
-        argv,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        stdin=subprocess.DEVNULL,
-        cwd=cwd or None,
-        **detached_popen_kwargs(),  # detach from the request lifecycle (setsid / DETACHED_PROCESS)
+    """Reject new detached launches while retaining the legacy API shape."""
+    # There is intentionally no detached host-process fallback for agent
+    # commands. The only executor is a bounded sidecar container, which cannot
+    # safely keep a process alive beyond its request lifecycle. Keep the legacy
+    # read/kill helpers below so existing records can still be cleaned up.
+    raise RuntimeError(
+        "Detached background jobs are disabled; use the isolated foreground executor."
     )
 
-    rec = {
-        "id": job_id,
-        "session_id": session_id,
-        "command": command,
-        "status": "running",       # running | done | failed
-        "pid": proc.pid,
-        "started_at": time.time(),
-        "ended_at": None,
-        "exit_code": None,
-        "max_runtime_s": max_runtime_s,
-        "followed_up": False,       # has the agent been re-invoked with the result?
-        "log_path": str(log_path),
-        "exit_path": str(exit_path),
-    }
-    jobs = _load()
-    jobs[job_id] = rec
-    _save(jobs)
-    return rec
 
 
 def _read_output(rec: Dict[str, Any]) -> str:

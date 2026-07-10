@@ -16,6 +16,11 @@ services:
       # land under /app/.local for the odysseus user. Persist them so a
       # container recreate does not silently remove installed serve engines.
       - ${APP_DATA_DIR:-./data}/local:/app/.local:z
+      # The agent and the isolated executor share only this dedicated volume.
+      # It intentionally contains neither app state nor host paths.
+      - agent-workspace:/workspace:rw
+      # The app may connect to, but cannot alter, the executor control socket.
+      - tool-sandbox-socket:/run/odysseus-sandbox:ro
     extra_hosts:
       # Lets the container reach local services on the Docker host, including
       # Ollama at http://host.docker.internal:11434.
@@ -47,6 +52,15 @@ services:
       - ODYSSEUS_INPROCESS_POLLERS=${ODYSSEUS_INPROCESS_POLLERS:-1}
       - ODYSSEUS_INPROCESS_TASKS=${ODYSSEUS_INPROCESS_TASKS:-1}
       - ODYSSEUS_SCRIPT_HOST=${ODYSSEUS_SCRIPT_HOST:-localhost}
+      - ODYSSEUS_AGENT_WORKSPACE_ROOT=/workspace
+      # A private Unix socket avoids putting the command sandbox on any IP
+      # network, including the application's normal service network.
+      - ODYSSEUS_TOOL_SANDBOX_SOCKET=/run/odysseus-sandbox/executor.sock
+      - ODYSSEUS_TOOL_SANDBOX_TOKEN=${ODYSSEUS_TOOL_SANDBOX_TOKEN:?Set ODYSSEUS_TOOL_SANDBOX_TOKEN to a long random value in .env}
+      - ODYSSEUS_TOOL_SANDBOX_GID=65532
+      # Disabled by default: Cookbook model/process/SSH control runs outside
+      # the unprivileged tool sidecar and must be consciously enabled.
+      - ODYSSEUS_ENABLE_HIGH_TRUST_COOKBOOK=${ODYSSEUS_ENABLE_HIGH_TRUST_COOKBOOK:-false}
       - ODYSSEUS_CHAT_UPLOAD_MAX_BYTES=${ODYSSEUS_CHAT_UPLOAD_MAX_BYTES:-10485760}
       - ODYSSEUS_GALLERY_UPLOAD_MAX_BYTES=${ODYSSEUS_GALLERY_UPLOAD_MAX_BYTES:-104857600}
       - ODYSSEUS_GALLERY_TRANSFORM_UPLOAD_MAX_BYTES=${ODYSSEUS_GALLERY_TRANSFORM_UPLOAD_MAX_BYTES:-26214400}
@@ -75,10 +89,62 @@ services:
         condition: service_healthy
       chromadb:
         condition: service_started
+      tool-sandbox:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # The only component that executes model/admin-provided commands. It is not
+  # reachable from the host or any IP network. Its only control channel is a
+  # private Unix socket; it sees only the disposable agent workspace volume.
+  tool-sandbox:
+    build:
+      context: .
+      dockerfile: services/tool_sandbox/Dockerfile
+    # The server starts only long enough as root to create the root-owned
+    # socket, then irreversibly drops to UID/GID 65532 before serving requests
+    # or launching a command.
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    environment:
+      - ODYSSEUS_TOOL_SANDBOX_TOKEN=${ODYSSEUS_TOOL_SANDBOX_TOKEN:?Set ODYSSEUS_TOOL_SANDBOX_TOKEN to a long random value in .env}
+      - ODYSSEUS_TOOL_SANDBOX_SOCKET=/run/odysseus-sandbox/executor.sock
+      - ODYSSEUS_TOOL_SANDBOX_GID=65532
+      - PYTHONDONTWRITEBYTECODE=1
+    volumes:
+      - agent-workspace:/workspace:rw
+      - tool-sandbox-socket:/run/odysseus-sandbox:rw
+    cap_drop:
+      - ALL
+    # Required only for startup: create/chown the socket and then setuid/setgid
+    # into the dedicated executor identity.  The served process has none left.
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 64
+    mem_limit: 640m
+    cpus: 1.0
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          python -c "import socket; s=socket.socket(socket.AF_UNIX); s.settimeout(3);
+          s.connect('/run/odysseus-sandbox/executor.sock'); s.sendall(b'GET /healthz HTTP/1.0\r\nHost: localhost\r\n\r\n');
+          assert b' 200 ' in s.recv(256)"
+      interval: 5s
+      timeout: 4s
+      retries: 10
+      start_period: 5s
+    network_mode: "none"
     restart: unless-stopped
 
   chromadb:
-    image: docker.io/chromadb/chroma:latest
+    # Reviewed on 2026-07-10 from chromadb/chroma:latest; the digest, not the
+    # mutable source tag, is what Compose actually pulls.
+    image: docker.io/chromadb/chroma@sha256:1e0b73a187a28757c572acba508c46f48c9e8b0acaf5c20e6d95cdedce1acdf6
     ports:
       - "${CHROMADB_BIND:-127.0.0.1}:8100:8000"
     volumes:
@@ -93,7 +159,7 @@ services:
     # tag blocks the whole app from starting. 2026.6.2 crashes on boot with
     # `KeyError: 'default_doi_resolver'`, failing the healthcheck (issue #1414).
     # Bump this deliberately after verifying a newer tag boots clean.
-    image: docker.io/searxng/searxng:2026.5.31-7159b8aed
+    image: docker.io/searxng/searxng@sha256:35b089054ac9b4257976107e71673d9e30ac17c9b50bbf8b4783f2f6d1d1981f
     entrypoint:
       - /bin/sh
       - -c
@@ -138,7 +204,9 @@ services:
     restart: unless-stopped
 
   ntfy:
-    image: docker.io/binwiederhier/ntfy
+    # Reviewed on 2026-07-10 from binwiederhier/ntfy:latest; pin the digest
+    # and update it deliberately after release validation.
+    image: docker.io/binwiederhier/ntfy@sha256:a6d335064ae927c4dbef118e1fa39656b3d2e01472b2a82af5915d5cebfe815f
     command: serve
     ports:
       - "${NTFY_BIND:-127.0.0.1}:8091:80"
@@ -149,6 +217,8 @@ services:
     restart: unless-stopped
 
 volumes:
+  agent-workspace:
+  tool-sandbox-socket:
   searxng-data:
   chromadb-data:
   ntfy-cache:

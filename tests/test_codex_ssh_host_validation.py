@@ -1,11 +1,5 @@
-"""The Codex cookbook bridge resolves a task's SSH target (remoteHost / sshPort)
-from cookbook_state.json and interpolates it into an ``ssh ...`` command string
-that runs through a shell. The command body is shlex-quoted, but the host and
-port were not validated, so a tampered task entry carrying shell metacharacters
-in ``remoteHost`` would be injected into that command.
-
-These pin validation on the host/port before they reach the ssh string, matching
-the validators the rest of the cookbook routes already apply.
+"""The Codex cookbook bridge validates an SSH task target before it is used in
+the narrow argv-only high-trust Cookbook monitor controls.
 """
 import asyncio
 
@@ -59,45 +53,50 @@ def _codex_request(scopes) -> Request:
 def test_rejects_remote_host_with_shell_metacharacters():
     task = {"remoteHost": "box; rm -rf ~", "sshPort": ""}
     with pytest.raises(HTTPException) as exc:
-        codex_routes._ssh_prefix_for_task(task)
+        codex_routes._cookbook_task_target(task)
     assert exc.value.status_code == 400
 
 
 def test_rejects_non_numeric_ssh_port():
     task = {"remoteHost": "box", "sshPort": "22; evil"}
     with pytest.raises(HTTPException) as exc:
-        codex_routes._ssh_prefix_for_task(task)
+        codex_routes._cookbook_task_target(task)
     assert exc.value.status_code == 400
 
 
 def test_local_task_has_no_host():
-    host, port_flag = codex_routes._ssh_prefix_for_task({})
+    host, port = codex_routes._cookbook_task_target({})
     assert host == ""
-    assert port_flag == ""
+    assert port == ""
 
 
 def test_valid_remote_builds_port_flag():
-    host, port_flag = codex_routes._ssh_prefix_for_task(
+    host, port = codex_routes._cookbook_task_target(
         {"remoteHost": "user@box", "sshPort": "2222"}
     )
     assert host == "user@box"
-    assert port_flag == "-p 2222 "
+    assert port == "2222"
+    assert codex_routes._high_trust_ssh_argv(host, port, "tmux ls") == [
+        "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
+        "-p", "2222", "user@box", "tmux ls",
+    ]
 
 
 def test_integer_ssh_port_in_stored_task_normalizes_without_crashing():
-    host, port_flag = codex_routes._ssh_prefix_for_task(
+    host, port = codex_routes._cookbook_task_target(
         {"remoteHost": "user@box", "sshPort": 2222}
     )
     assert host == "user@box"
-    assert port_flag == "-p 2222 "
+    assert port == "2222"
 
 
 def test_default_ssh_port_omits_flag():
-    host, port_flag = codex_routes._ssh_prefix_for_task(
+    host, port = codex_routes._cookbook_task_target(
         {"remoteHost": "box", "sshPort": "22"}
     )
     assert host == "box"
-    assert port_flag == ""
+    assert port == "22"
+    assert "-p" not in codex_routes._high_trust_ssh_argv(host, port, "tmux ls")
 
 
 def _documents_endpoint(total: int):
@@ -201,6 +200,7 @@ async def test_documents_pagination_out_of_range_offset_returns_empty_page():
 
 def test_adopt_rejects_ssh_option_host_before_shell(monkeypatch):
     calls = []
+    monkeypatch.setenv("ODYSSEUS_ENABLE_HIGH_TRUST_COOKBOOK", "true")
 
     async def fail_if_shell_runs(*args, **kwargs):
         calls.append((args, kwargs))

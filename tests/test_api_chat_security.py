@@ -175,9 +175,12 @@ class _DB:
 
 
 class _ChatSession:
-    def __init__(self, endpoint_url, model):
+    def __init__(self, endpoint_url, model, *, name="API Chat", owner="alice", outbound_url_policy="configured"):
+        self.name = name
+        self.owner = owner
         self.endpoint_url = endpoint_url
         self.model = model
+        self.outbound_url_policy = outbound_url_policy
         self.headers = {}
         self.history = []
 
@@ -190,14 +193,21 @@ class _SessionManager:
         self.created = []
         self.save_calls = 0
 
-    def create_session(self, *, session_id, name, endpoint_url, model, owner):
-        session = _ChatSession(endpoint_url, model)
+    def create_session(self, *, session_id, name, endpoint_url, model, owner, outbound_url_policy="configured"):
+        session = _ChatSession(
+            endpoint_url,
+            model,
+            name=name,
+            owner=owner,
+            outbound_url_policy=outbound_url_policy,
+        )
         self.created.append({
             "session_id": session_id,
             "name": name,
             "endpoint_url": endpoint_url,
             "model": model,
             "owner": owner,
+            "outbound_url_policy": outbound_url_policy,
             "session": session,
         })
         return session
@@ -235,7 +245,10 @@ def _install_sync_chat_stubs(monkeypatch):
             self.role = role
             self.content = content
 
-    async def _llm_call_async(endpoint_url, model, messages, headers=None, timeout=None):
+    calls = []
+
+    async def _llm_call_async(endpoint_url, model, messages, headers=None, timeout=None, pinned_ip=None):
+        calls.append({"endpoint_url": endpoint_url, "pinned_ip": pinned_ip})
         return "mocked response"
 
     endpoint_resolver = types.ModuleType("src.endpoint_resolver")
@@ -252,6 +265,7 @@ def _install_sync_chat_stubs(monkeypatch):
     monkeypatch.setitem(sys.modules, "core.models", core_models)
     monkeypatch.setitem(sys.modules, "src.llm_core", llm_core)
     monkeypatch.setitem(sys.modules, "src.endpoint_resolver", endpoint_resolver)
+    return calls
 
 
 def _sync_chat_endpoint(webhook_routes, session_manager):
@@ -299,7 +313,7 @@ async def test_api_chat_direct_base_url_rejects_local_private_targets(monkeypatc
 @pytest.mark.asyncio
 async def test_api_chat_direct_base_url_allows_mocked_public_endpoint(monkeypatch):
     webhook_routes = _load_webhook_routes_for_test(monkeypatch)
-    _install_sync_chat_stubs(monkeypatch)
+    llm_calls = _install_sync_chat_stubs(monkeypatch)
 
     from src import url_security
 
@@ -325,6 +339,40 @@ async def test_api_chat_direct_base_url_allows_mocked_public_endpoint(monkeypatc
     assert response["response"] == "mocked response"
     assert response["model"] == "test-model"
     assert session_manager.created[0]["endpoint_url"] == "https://api.example.com/v1/chat/completions"
+    assert session_manager.created[0]["outbound_url_policy"] == "direct-public-pinned"
+    assert llm_calls[0]["pinned_ip"] == ipaddress.ip_address("93.184.216.34")
+
+
+@pytest.mark.asyncio
+async def test_api_chat_rejects_dns_rebinding_before_creating_or_connecting(monkeypatch):
+    webhook_routes = _load_webhook_routes_for_test(monkeypatch)
+    llm_calls = _install_sync_chat_stubs(monkeypatch)
+
+    from src import url_security
+
+    resolutions = iter([
+        [ipaddress.ip_address("93.184.216.34")],
+        [ipaddress.ip_address("169.254.169.254")],
+    ])
+    monkeypatch.setattr(url_security, "_resolve_hostname_ips", lambda host: next(resolutions))
+
+    session_manager = _SessionManager()
+    sync_chat = _sync_chat_endpoint(webhook_routes, session_manager)
+    body = types.SimpleNamespace(
+        message="hello",
+        api_key="test-key",
+        base_url="https://api.example.com/v1",
+        model="test-model",
+        provider=None,
+        session=None,
+    )
+
+    with pytest.raises(webhook_routes.HTTPException) as exc:
+        await sync_chat(_Request(), body)
+
+    assert exc.value.status_code == 400
+    assert session_manager.created == []
+    assert llm_calls == []
 
 
 def test_api_chat_fallback_endpoint_selection_for_owned_token(monkeypatch):
