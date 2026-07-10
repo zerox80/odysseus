@@ -111,11 +111,17 @@ targets. If a fully trusted administrator needs those operations, set this in
 
 ```bash
 ODYSSEUS_ENABLE_HIGH_TRUST_COOKBOOK=true
+# Optional: permit bounded local model metadata reads below these directories.
+ODYSSEUS_HW_FIT_MODEL_ROOTS=/models:/data/huggingface
 ```
 
 This re-enables a deliberately high-trust administration capability; it is not
 a sandbox escape hatch and should remain off for exposed or tool-enabled
 sessions that may process untrusted content.
+
+Hardware Fit model-path metadata is disabled unless
+`ODYSSEUS_HW_FIT_MODEL_ROOTS` names the approved local directories. The probe
+is administrator-only, does not follow symlinks, and has depth/entry limits.
 
 **Remote servers.** In **Cookbook -> Settings -> Servers**, generate the
 Odysseus SSH key and add the public key to the remote server's

@@ -4,6 +4,7 @@ import re
 import shlex
 import subprocess
 from copy import deepcopy
+from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
 
@@ -18,6 +19,10 @@ from src.high_trust_operations import HIGH_TRUST_COOKBOOK_HINT, high_trust_cookb
 # "metal" routes through the Apple-Silicon path (GGUF-only, llama.cpp/Ollama),
 # the CPU backends through the RAM/offload path, cuda/rocm through vLLM.
 _MANUAL_BACKENDS = {"cuda", "rocm", "metal", "cpu_x86", "cpu_arm"}
+_MODEL_WEIGHT_SUFFIXES = {".safetensors", ".bin", ".gguf"}
+_MAX_MODEL_PROBE_DEPTH = 6
+_MAX_MODEL_PROBE_ENTRIES = 10_000
+_MAX_MODEL_CONFIG_BYTES = 1_048_576
 
 
 def _validate_detection_target(
@@ -43,6 +48,48 @@ def _validate_detection_target(
             raise HTTPException(403, "Remote hardware probes require an authenticated request.")
         require_admin(request)
     return host_value, port_value
+
+
+def _configured_local_model_roots() -> tuple[Path, ...]:
+    """Return canonical local roots explicitly approved for model metadata reads."""
+    raw_roots = os.getenv("ODYSSEUS_HW_FIT_MODEL_ROOTS", "")
+    roots = []
+    for raw_root in raw_roots.split(os.pathsep):
+        value = raw_root.strip()
+        if not value:
+            continue
+        root = Path(value).expanduser()
+        if not root.is_absolute():
+            continue
+        roots.append(root.resolve(strict=False))
+    return tuple(roots)
+
+
+def _validate_model_path_probe(model_path: str, host: str, request: Request | None) -> str:
+    """Authorize and confine a filesystem-backed model metadata probe."""
+    path = (model_path or "").strip()
+    if not path or path.startswith(("http://", "https://")):
+        return ""
+    if not (path.startswith("~") or os.path.isabs(path)):
+        return ""
+    if not high_trust_cookbook_enabled():
+        raise HTTPException(403, HIGH_TRUST_COOKBOOK_HINT)
+    if request is None:
+        raise HTTPException(403, "Model metadata probes require an authenticated administrator request.")
+    require_admin(request)
+    if host:
+        return path
+
+    candidate = Path(path).expanduser().resolve(strict=False)
+    roots = _configured_local_model_roots()
+    if not roots:
+        raise HTTPException(
+            403,
+            "Local model metadata probes are disabled. Set ODYSSEUS_HW_FIT_MODEL_ROOTS to trusted model directories.",
+        )
+    if any(candidate == root or root in candidate.parents for root in roots):
+        return str(candidate)
+    raise HTTPException(403, "Model path is outside ODYSSEUS_HW_FIT_MODEL_ROOTS.")
 
 
 def _apply_manual_hardware(system, manual_mode="", manual_gpu_count="", manual_vram_gb="", manual_ram_gb="", manual_backend=""):
@@ -152,13 +199,82 @@ def _run_model_probe(host: str, ssh_port: str, cmd: str) -> str:
     return ""
 
 
+def _inspect_local_model_path(path: Path) -> dict:
+    """Read bounded metadata without a shell and without following symlinks."""
+    out = {}
+    try:
+        if not path.is_dir():
+            out["model_probe_error"] = f"Model path is not visible on local container: {path}"
+            return out
+    except OSError:
+        out["model_probe_error"] = f"Model path is not visible on local container: {path}"
+        return out
+
+    config_path = path / "config.json"
+    config_found = False
+    try:
+        if not config_path.is_symlink() and config_path.is_file():
+            config_found = True
+            if config_path.stat().st_size <= _MAX_MODEL_CONFIG_BYTES:
+                cfg = json.loads(config_path.read_text(encoding="utf-8"))
+            else:
+                cfg = {}
+        else:
+            cfg = {}
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        cfg = {}
+    for key in ("context_length", "max_position_embeddings", "n_ctx_train", "model_max_length", "max_seq_len"):
+        value = cfg.get(key)
+        if isinstance(value, (int, float)) and value > 0:
+            out["model_ctx_max"] = int(value)
+            break
+    if not config_found:
+        out["model_probe_error"] = f"config.json not found in model path: {path}"
+
+    total_bytes = 0
+    entries_seen = 0
+    limited = False
+    pending = [(path, 0)]
+    while pending and entries_seen < _MAX_MODEL_PROBE_ENTRIES:
+        directory, depth = pending.pop()
+        try:
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    entries_seen += 1
+                    if entries_seen > _MAX_MODEL_PROBE_ENTRIES:
+                        limited = True
+                        break
+                    if entry.is_symlink():
+                        continue
+                    if entry.is_file(follow_symlinks=False) and Path(entry.name).suffix.lower() in _MODEL_WEIGHT_SUFFIXES:
+                        try:
+                            total_bytes += entry.stat(follow_symlinks=False).st_size
+                        except OSError:
+                            continue
+                    elif depth < _MAX_MODEL_PROBE_DEPTH and entry.is_dir(follow_symlinks=False):
+                        pending.append((Path(entry.path), depth + 1))
+        except OSError:
+            continue
+    if pending:
+        limited = True
+    if total_bytes:
+        out["model_weights_gb"] = round(total_bytes / 1073741824, 3)
+    elif "model_probe_error" not in out:
+        out["model_probe_error"] = f"No model weight files found in: {path}"
+    if limited:
+        out["model_probe_limited"] = True
+    return out
+
+
 def _inspect_model_path(model_path: str, host: str = "", ssh_port: str = "") -> dict:
-    """Read lightweight metadata from a local or SSH-visible HF model folder."""
+    """Read lightweight metadata from an already-authorized model folder."""
     path = (model_path or "").strip()
     if not path or path.startswith(("http://", "https://")):
         return {}
-    if not (path.startswith("/") or path.startswith("~")):
+    if not (path.startswith("~") or os.path.isabs(path)):
         return {}
+    if not host:
+        return _inspect_local_model_path(Path(path))
 
     qpath = shlex.quote(path)
     qconfig = shlex.quote(os.path.join(path, "config.json"))
@@ -183,7 +299,7 @@ def _inspect_model_path(model_path: str, host: str = "", ssh_port: str = "") -> 
         out["model_probe_error"] = f"config.json not found in model path: {path}"
 
     size_cmd = (
-        f"find {qpath} -type f \\( -name '*.safetensors' -o -name '*.bin' -o -name '*.gguf' \\) "
+        f"find {qpath} -maxdepth {_MAX_MODEL_PROBE_DEPTH} -type f \\( -name '*.safetensors' -o -name '*.bin' -o -name '*.gguf' \\) "
         "-printf '%s\\n' 2>/dev/null | awk '{s+=$1} END {if (s>0) printf \"%.6f\", s/1073741824}'"
     )
     weights = _run_model_probe(host, ssh_port, size_cmd)
@@ -354,6 +470,7 @@ def setup_hwfit_routes():
         from services.hwfit.models import get_models
         from services.hwfit.profiles import compute_serve_profiles
         host, ssh_port = _validate_detection_target(host, ssh_port, request)
+        probe_path = _validate_model_path_probe(model_path or model, host, request)
         system = detect_system(host=host, ssh_port=ssh_port, platform=platform, fresh=fresh)
         if system.get("error"):
             return {"system": system, "profiles": [], "error": system["error"]}
@@ -393,7 +510,7 @@ def setup_hwfit_routes():
                 if nn and (nn == want or want.endswith(nn) or nn.endswith(want)):
                     m = entry
                     break
-        path_meta = _inspect_model_path(model_path or model, host=host, ssh_port=ssh_port)
+        path_meta = _inspect_model_path(probe_path, host=host, ssh_port=ssh_port)
         if m is None:
             return {
                 "system": system,

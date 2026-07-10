@@ -61,6 +61,9 @@ services:
       # Disabled by default: Cookbook model/process/SSH control runs outside
       # the unprivileged tool sidecar and must be consciously enabled.
       - ODYSSEUS_ENABLE_HIGH_TRUST_COOKBOOK=${ODYSSEUS_ENABLE_HIGH_TRUST_COOKBOOK:-false}
+      # Empty by default: filesystem-backed model metadata probing stays off
+      # until an operator explicitly allows one or more model roots.
+      - ODYSSEUS_HW_FIT_MODEL_ROOTS=${ODYSSEUS_HW_FIT_MODEL_ROOTS:-}
       - ODYSSEUS_CHAT_UPLOAD_MAX_BYTES=${ODYSSEUS_CHAT_UPLOAD_MAX_BYTES:-10485760}
       - ODYSSEUS_GALLERY_UPLOAD_MAX_BYTES=${ODYSSEUS_GALLERY_UPLOAD_MAX_BYTES:-104857600}
       - ODYSSEUS_GALLERY_TRANSFORM_UPLOAD_MAX_BYTES=${ODYSSEUS_GALLERY_TRANSFORM_UPLOAD_MAX_BYTES:-26214400}

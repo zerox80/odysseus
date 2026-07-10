@@ -88,6 +88,52 @@ def test_remote_hwfit_probe_without_http_request_fails_closed(monkeypatch):
     assert exc.value.status_code == 403
 
 
+def test_local_model_path_probe_requires_high_trust_admin_and_configured_root(monkeypatch, tmp_path):
+    import routes.hwfit_routes as hwfit_routes
+
+    model_dir = tmp_path / "models" / "demo"
+    model_dir.mkdir(parents=True)
+    request = object()
+    with pytest.raises(HTTPException) as exc:
+        hwfit_routes._validate_model_path_probe(str(model_dir), "", request)
+    assert exc.value.status_code == 403
+
+    calls = []
+    monkeypatch.setenv("ODYSSEUS_ENABLE_HIGH_TRUST_COOKBOOK", "true")
+    monkeypatch.setattr(hwfit_routes, "require_admin", lambda req: calls.append(req))
+    with pytest.raises(HTTPException) as exc:
+        hwfit_routes._validate_model_path_probe(str(model_dir), "", request)
+    assert exc.value.status_code == 403
+    assert "ODYSSEUS_HW_FIT_MODEL_ROOTS" in str(exc.value.detail)
+
+    monkeypatch.setenv("ODYSSEUS_HW_FIT_MODEL_ROOTS", str(tmp_path / "models"))
+    assert hwfit_routes._validate_model_path_probe(str(model_dir), "", request) == str(model_dir.resolve())
+    assert calls == [request, request]
+
+
+def test_local_model_probe_confines_paths_and_never_uses_a_shell(monkeypatch, tmp_path):
+    import routes.hwfit_routes as hwfit_routes
+
+    root = tmp_path / "models"
+    model_dir = root / "demo"
+    model_dir.mkdir(parents=True)
+    (model_dir / "config.json").write_text('{"max_position_embeddings": 8192}', encoding="utf-8")
+    (model_dir / "weights.gguf").write_bytes(b"weight" * 200_000)
+    monkeypatch.setenv("ODYSSEUS_ENABLE_HIGH_TRUST_COOKBOOK", "true")
+    monkeypatch.setenv("ODYSSEUS_HW_FIT_MODEL_ROOTS", str(root))
+    monkeypatch.setattr(hwfit_routes, "require_admin", lambda request: None)
+    monkeypatch.setattr(hwfit_routes.subprocess, "run", lambda *args, **kwargs: pytest.fail("local probe used a shell"))
+
+    approved = hwfit_routes._validate_model_path_probe(str(model_dir), "", object())
+    metadata = hwfit_routes._inspect_model_path(approved)
+    assert metadata["model_ctx_max"] == 8192
+    assert metadata["model_weights_gb"] > 0
+
+    with pytest.raises(HTTPException) as exc:
+        hwfit_routes._validate_model_path_probe(str(tmp_path), "", object())
+    assert exc.value.status_code == 403
+
+
 def test_remote_hwfit_endpoint_receives_request_and_fails_closed_by_default(monkeypatch):
     monkeypatch.delenv("ODYSSEUS_ENABLE_HIGH_TRUST_COOKBOOK", raising=False)
     app = FastAPI()
