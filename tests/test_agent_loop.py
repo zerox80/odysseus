@@ -70,7 +70,8 @@ def test_agent_prompt_uses_shared_response_policy_and_uncertainty_search():
     prompt = _assemble_prompt({"web_search", "web_fetch"}, compact=False)
 
     assert "## Odysseus response policy" in prompt
-    assert "Match the user's language and requested depth" in prompt
+    assert "Match the user's language." in prompt
+    assert "Default to substantial, thorough answers" in prompt
     assert "Do not invent facts, sources, actions, or tool results" in prompt
     assert "whenever you are not highly confident" in prompt
     assert "Do not guess stale facts" in prompt
@@ -82,7 +83,8 @@ def test_api_agent_prompt_uses_shared_response_policy_and_native_tools():
     prompt = _assemble_prompt({"web_search", "web_fetch"}, compact=True)
 
     assert "## Odysseus response policy" in prompt
-    assert "Match the user's language and requested depth" in prompt
+    assert "Match the user's language." in prompt
+    assert "Default to substantial, thorough answers" in prompt
     assert "## Native tool calling" in prompt
     assert "whenever you are not highly confident" in prompt
     assert "Do not guess stale facts" in prompt
@@ -96,7 +98,8 @@ def test_minimal_general_prompt_keeps_shared_response_basics():
 
     system = prompt_messages[0]["content"]
     assert "You are Odysseus" in system
-    assert "Match the user's language and requested depth" in system
+    assert "Match the user's language." in system
+    assert "Default to substantial, useful answers" in system
     assert "never claim an action or result that did not occur" in system
 
 
