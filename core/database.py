@@ -115,6 +115,14 @@ class Session(TimestampMixin, Base):
     endpoint_url = Column(String, nullable=False)
     model = Column(String, nullable=False)
     owner = Column(String, nullable=True, index=True)  # username; null = legacy/shared
+    # Provenance for outbound endpoint handling. API-token supplied public URLs
+    # require a fresh DNS check plus IP-pinned connect on every request.
+    outbound_url_policy = Column(
+        String,
+        nullable=False,
+        default="configured",
+        server_default="configured",
+    )
     
     # Configuration flags
     rag = Column(Boolean, default=False)
@@ -1836,6 +1844,48 @@ def _migrate_seed_email_account():
 # Any future migrations or schema changes that temporarily violate foreign-key
 # constraints will fail. To perform such operations, foreign_keys must be
 # temporarily disabled around the migration workflow.
+def _migrate_add_outbound_url_policy():
+    """Add a fail-closed provenance marker for persisted API-chat sessions.
+
+    Only pre-existing ``API Chat`` rows cannot tell whether their endpoint
+    originated from a token-supplied ``base_url``; mark exactly those
+    ``legacy-api-unknown`` rather than risk resuming a potentially unpinned
+    endpoint. Every other existing session was created through configured
+    endpoints and keeps the model default (``configured``) — stamping them
+    ``legacy-api-unknown`` would block API-token resume for all normal
+    sessions after the upgrade.
+    """
+    if not DATABASE_URL.startswith("sqlite"):
+        return
+    db_path = DATABASE_URL.replace("sqlite:///", "", 1)
+    if not os.path.exists(db_path):
+        return
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path)
+        columns = [row[1] for row in conn.execute("PRAGMA table_info(sessions)")]
+        if "outbound_url_policy" not in columns:
+            conn.execute(
+                "ALTER TABLE sessions ADD COLUMN outbound_url_policy "
+                "TEXT NOT NULL DEFAULT 'configured'"
+            )
+            conn.execute(
+                "UPDATE sessions SET outbound_url_policy = 'legacy-api-unknown' "
+                "WHERE name = 'API Chat'"
+            )
+            conn.commit()
+            logging.getLogger(__name__).info(
+                "Migrated: added fail-closed outbound URL policy to API Chat sessions"
+            )
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"outbound URL policy migration failed: {e}")
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
 def init_db():
     """
     Initialize the database by creating all tables.
@@ -1885,6 +1935,7 @@ def init_db():
     _migrate_add_calendar_account_id()
     _migrate_add_caldav_sync_columns()
     _migrate_add_calendar_recurrence_exdates()
+    _migrate_add_outbound_url_policy()
     _migrate_chat_messages_fts()
     _migrate_encrypt_email_passwords()
     _migrate_encrypt_signatures()

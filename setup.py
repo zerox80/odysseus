@@ -146,10 +146,10 @@ def create_default_admin():
             print("  [error] bcrypt loaded with the wrong CPU architecture.")
             print("          Rebuild the venv with an arm64 Python:")
             print("            rm -rf venv && /opt/homebrew/bin/python3.11 -m venv venv")
-            print("            ./venv/bin/pip install -r requirements.txt")
+            print("            ./venv/bin/pip install --require-hashes -r requirements.txt")
             return "skipped"
         print("  [warn] bcrypt not installed — skipping admin user creation")
-        print("         Run: pip install bcrypt")
+        print("         Run: pip install --require-hashes -r requirements.txt")
         return "skipped"
 
 
@@ -179,7 +179,7 @@ def check_deps():
             missing.append(mod)
     if missing:
         print(f"\n  [warn] Missing packages: {', '.join(missing)}")
-        print(f"         Run: pip install -r requirements.txt")
+        print(f"         Run: pip install --require-hashes -r requirements.txt")
     else:
         print("  [ok] All core dependencies installed")
 
@@ -230,7 +230,7 @@ def check_arch():
     print("            brew install python@3.11          # if you don't have it yet")
     print("            rm -rf venv")
     print("            /opt/homebrew/bin/python3.11 -m venv venv")
-    print("            ./venv/bin/pip install -r requirements.txt")
+    print("            ./venv/bin/pip install --require-hashes -r requirements.txt")
     print("            ./venv/bin/python setup.py")
     print("\n          Tip: ./start-macos.sh does all of this with the right Python.\n")
     sys.exit(1)
@@ -292,7 +292,7 @@ def main():
     elif admin_status == "exists":
         print("Login with your existing admin credentials.\n")
     elif admin_status == "skipped":
-        print("Admin creation did not happen: dependencies are missing.\nRun 'pip install bcrypt' and rerun setup.\n")
+        print("Admin creation did not happen: dependencies are missing.\nRun 'pip install --require-hashes -r requirements.txt' and rerun setup.\n")
     elif admin_status == "failed":
         print("Admin creation did not happen: a system or file error occurred.\nCheck write permissions for the 'data' directory and rerun setup.\n")
     else:  # handling "failed" or any unhandled edge case

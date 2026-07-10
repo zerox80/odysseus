@@ -70,9 +70,11 @@ _NOW = 5_000.0
 
 
 def _endpoint(router):
+    # The registered route takes only `request` (multipart is parsed inside);
+    # these service-level tests use the direct-call seam to inject file stubs.
     for r in router.routes:
         if getattr(r, "path", None) == "/api/upload" and "POST" in getattr(r, "methods", set()):
-            return r.endpoint
+            return r.endpoint.direct_handler
     raise AssertionError("upload endpoint not found")
 
 

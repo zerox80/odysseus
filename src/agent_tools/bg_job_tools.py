@@ -1,13 +1,9 @@
-"""Agent tool to inspect and control detached background `bash` jobs.
+"""Inspect and control historical detached-job records scoped to a chat.
 
-`bash` blocks prefixed with a `#!bg` marker run detached via `src.bg_jobs`; the
-agent is auto-re-invoked with the output when they finish. This tool covers the
-gaps in that flow: list the jobs in the current chat, read a still-running job's
-output on demand, and kill a runaway job instead of waiting out its max-runtime.
-
-Registry tool (`TOOL_HANDLERS["manage_bg_jobs"]`). Jobs are scoped to the chat
-that launched them, so every action requires the caller's `session_id` and a job
-from another session is treated as not found.
+New ``#!bg`` commands are deliberately disabled: generic execution must remain
+inside the isolated, synchronous executor and may never fall back to the app
+host. This tool remains available to inspect output or terminate legacy job
+records created before that policy took effect.
 """
 
 import json

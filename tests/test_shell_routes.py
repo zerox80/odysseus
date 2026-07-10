@@ -290,6 +290,7 @@ class TestHostDockerAccess:
 
         assert _host_docker_access_enabled(str(socket_path)) is False
 
+    @pytest.mark.skipif(not hasattr(socket, "AF_UNIX"), reason="Unix-domain sockets are unavailable on this platform")
     @pytest.mark.parametrize("flag", [None, "false"])
     def test_socket_without_explicit_opt_in_is_disabled(
         self,
@@ -307,6 +308,7 @@ class TestHostDockerAccess:
 
             assert _host_docker_access_enabled(str(socket_path)) is False
 
+    @pytest.mark.skipif(not hasattr(socket, "AF_UNIX"), reason="Unix-domain sockets are unavailable on this platform")
     def test_explicit_opt_in_with_unix_socket_is_enabled(
         self,
         monkeypatch,

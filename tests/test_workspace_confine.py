@@ -34,8 +34,11 @@ def _block(tool, content=""):
 
 
 @pytest.fixture
-def ws():
-    d = tempfile.mkdtemp()
+def ws(monkeypatch):
+    root = tempfile.mkdtemp()
+    monkeypatch.setenv("ODYSSEUS_AGENT_WORKSPACE_ROOT", root)
+    d = os.path.join(root, "project")
+    os.mkdir(d)
     with open(os.path.join(d, "a.txt"), "w") as f:
         f.write("x")
     return d
@@ -200,11 +203,21 @@ async def test_glob_skips_sensitive_files_in_workspace(ws, admin):
 
 
 @pytest.mark.asyncio
-async def test_subprocess_cwd_is_workspace_e2e(ws, admin):
-    """python tool runs with cwd = workspace (OS-agnostic probe)."""
+async def test_subprocess_cwd_is_workspace_e2e(ws, admin, monkeypatch):
+    """python tool receives only a sidecar-relative workspace directory."""
+    import src.agent_tools.subprocess_tools as st
+
+    captured = {}
+
+    async def fake_execute(command, *, timeout, workdir):
+        captured.update(command=command, timeout=timeout, workdir=workdir)
+        return {"stdout": "ok", "stderr": "", "exit_code": 0, "timed_out": False}
+
+    monkeypatch.setattr(st, "execute_sandbox_command", fake_execute)
     _, r = await execute_tool_block(_block("python", "import os; print(os.getcwd())"), owner="a", workspace=ws)
     assert r["exit_code"] == 0
-    assert os.path.realpath(r["output"].strip()) == os.path.realpath(ws)
+    assert r["output"] == "ok"
+    assert captured["workdir"] == "project"
 
 
 # ── get_workspace tool ──────────────────────────────────────────────────
@@ -212,7 +225,7 @@ async def test_subprocess_cwd_is_workspace_e2e(ws, admin):
 @pytest.mark.asyncio
 async def test_get_workspace_tool(ws, admin):
     _, r = await execute_tool_block(_block("get_workspace", ""), owner="a", workspace=ws)
-    assert r["exit_code"] == 0 and r["output"].startswith(ws) and "not sandboxed" in r["output"]
+    assert r["exit_code"] == 0 and r["output"].startswith(ws) and "isolated executor" in r["output"]
     _, r = await execute_tool_block(_block("get_workspace", ""), owner="a")  # none active
     assert r["exit_code"] == 0 and "No workspace" in r["output"]
 
@@ -335,7 +348,7 @@ def test_vet_workspace_rejects_filesystem_root():
     assert vet_workspace("/") is None
 
 
-def test_browse_marks_root_unselectable_and_vet_endpoint(monkeypatch):
+def test_browse_stays_inside_workspace_root_and_vet_endpoint(monkeypatch, tmp_path):
     import routes.workspace_routes as wr
 
     router = wr.setup_workspace_routes()
@@ -344,15 +357,20 @@ def test_browse_marks_root_unselectable_and_vet_endpoint(monkeypatch):
 
     monkeypatch.setattr(wr, "get_current_user", lambda req: "admin")
     monkeypatch.setattr(wr, "owner_is_admin_or_single_user", lambda owner: True)
+    workspace_root = tmp_path / "workspace"
+    child = workspace_root / "child"
+    child.mkdir(parents=True)
+    monkeypatch.setenv("ODYSSEUS_AGENT_WORKSPACE_ROOT", str(workspace_root))
 
     out = browse(request=object(), path="/")
-    assert out["selectable"] is False
-    out = browse(request=object(), path=os.path.expanduser("~"))
+    assert out["path"] == os.path.realpath(str(workspace_root))
     assert out["selectable"] is True
+    out = browse(request=object(), path=os.path.expanduser("~"))
+    assert out["path"] == os.path.realpath(str(workspace_root))
 
     assert vet(request=object(), path="/") == {"ok": False, "path": None}
-    home = os.path.realpath(os.path.expanduser("~"))
-    assert vet(request=object(), path="~") == {"ok": True, "path": home}
+    assert vet(request=object(), path="~") == {"ok": False, "path": None}
+    assert vet(request=object(), path=str(child)) == {"ok": True, "path": os.path.realpath(str(child))}
 
     from fastapi import HTTPException
     monkeypatch.setattr(wr, "owner_is_admin_or_single_user", lambda owner: False)

@@ -6,14 +6,19 @@ import asyncio
 import shutil
 import uuid
 from pathlib import Path
-from fastapi import APIRouter, Request, File, UploadFile, HTTPException, Form
-from typing import List, Optional
+from fastapi import APIRouter, Request, HTTPException
+from typing import Any, List, Optional
 import logging
 from core.middleware import require_admin
 from core.database import SessionLocal, GalleryImage, Session as DbSession
 from src.auth_helpers import effective_user
 from src.constants import GENERATED_IMAGES_DIR
 from src.upload_handler import count_recent_uploads
+from src.upload_body_limits import (
+    MAX_CHAT_UPLOAD_FILES,
+    parse_limited_multipart_form,
+    uploaded_values,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -130,15 +135,26 @@ def setup_upload_routes(upload_handler):
         finally:
             db.close()
     
-    @router.post("")
-    async def api_upload(
+    async def _handle_chat_upload(
         request: Request,
-        files: List[UploadFile] = File(...),
-        session_id: Optional[str] = Form(None),
+        files: Optional[List[Any]] = None,
+        session_id: Optional[str] = None,
     ):
-        """Upload files with enhanced security and organization."""
+        if files is None:
+            form = await parse_limited_multipart_form(
+                request, max_files=MAX_CHAT_UPLOAD_FILES
+            )
+            files = uploaded_values(form, "files")
+            submitted_session_id = form.get("session_id")
+            if isinstance(submitted_session_id, str):
+                session_id = submitted_session_id
+        elif not isinstance(files, list):
+            files = [files]
         if not isinstance(session_id, str):
             session_id = None
+        # ``uploaded_values`` has already discarded non-files for real
+        # multipart requests.  Keep direct internal callers compatible with
+        # the lightweight upload stubs used by the route's service tests.
         if not files:
             raise HTTPException(400, "No files uploaded")
             
@@ -188,9 +204,25 @@ def setup_upload_routes(upload_handler):
         
         if not out:
             raise HTTPException(500, "All file uploads failed")
-            
+
         return {"files": out}
-    
+
+    @router.post("")
+    async def api_upload(request: Request):
+        """Upload files with enhanced security and organization.
+
+        The route takes ONLY ``request``: any declared file/body parameter
+        would make FastAPI expect a JSON body and reject real multipart posts
+        with 422 before the size-limited ``request.form()`` parser runs.
+        (``File(...)`` is also out — FastAPI would parse and spool every
+        multipart part before this handler could apply its route limits.)
+        """
+        return await _handle_chat_upload(request)
+
+    # Direct-call seam: service-level tests and internal callers can pass an
+    # explicit file list without going through multipart parsing.
+    api_upload.direct_handler = _handle_chat_upload
+
     @router.post("/cleanup")
     async def manual_cleanup(request: Request):
         """Manually trigger cleanup of old uploads."""

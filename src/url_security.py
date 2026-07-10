@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import ipaddress
 import socket
+import ssl
 from urllib.parse import urlparse
+
+import httpcore
+import httpx
 
 
 _INTERNAL_HOSTNAMES = {
@@ -83,8 +87,10 @@ def validate_public_http_url(url: str, *, max_length: int = 2048) -> str:
 
     This is for untrusted outbound URLs, not admin-created model endpoints
     that are intentionally allowed to point at private model providers. DNS
-    failures fail closed, and DNS checks reduce obvious private-network
-    targets but do not eliminate every DNS rebinding race by themselves.
+    failures fail closed. Call ``validated_public_ips`` plus
+    ``PinnedAsyncTransport`` when a connection will be opened: that pair pins
+    the validated address and closes the DNS-rebinding race between validation
+    and connect.
     """
     cleaned = (url or "").strip()
     if len(cleaned) > max_length:
@@ -92,3 +98,124 @@ def validate_public_http_url(url: str, *, max_length: int = 2048) -> str:
     if not is_public_http_url(cleaned):
         raise ValueError("URL must point to a public HTTP(S) endpoint")
     return cleaned
+
+
+def validated_public_ips(url: str) -> list[ipaddress._BaseAddress]:
+    """Return public IPs for an already-approved outbound HTTP(S) URL.
+
+    Validation based only on a hostname lookup is vulnerable to DNS rebinding:
+    a later HTTP client lookup may get a different, internal address. This
+    helper resolves the host immediately before a request and returns the
+    concrete public address(es) that callers must pin for the socket connect.
+    Every answer must be public; mixed DNS responses fail closed.
+    """
+    cleaned = validate_public_http_url(url)
+    parsed = urlparse(cleaned)
+    hostname = (parsed.hostname or "").strip()
+    try:
+        literal = ipaddress.ip_address(hostname)
+    except ValueError:
+        literal = None
+    if literal is not None:
+        if _blocked_ip(literal):
+            raise ValueError("URL must point to a public HTTP(S) endpoint")
+        return [literal]
+
+    try:
+        addresses = _resolve_hostname_ips(hostname)
+    except OSError as exc:
+        raise ValueError("URL must point to a public HTTP(S) endpoint") from exc
+    if not addresses or any(_blocked_ip(address) for address in addresses):
+        raise ValueError("URL must point to a public HTTP(S) endpoint")
+    return addresses
+
+
+# httpcore raises its own exception hierarchy. Preserve httpx's public error
+# contract for callers that already catch or sanitize httpx exceptions.
+_HTTPCORE_TO_HTTPX_EXC = {
+    httpcore.ConnectError: httpx.ConnectError,
+    httpcore.ConnectTimeout: httpx.ConnectTimeout,
+    httpcore.NetworkError: httpx.NetworkError,
+    httpcore.PoolTimeout: httpx.PoolTimeout,
+    httpcore.ProtocolError: httpx.ProtocolError,
+    httpcore.ReadError: httpx.ReadError,
+    httpcore.ReadTimeout: httpx.ReadTimeout,
+    httpcore.RemoteProtocolError: httpx.RemoteProtocolError,
+    httpcore.TimeoutException: httpx.TimeoutException,
+    httpcore.WriteError: httpx.WriteError,
+    httpcore.WriteTimeout: httpx.WriteTimeout,
+}
+
+
+class _PinnedAsyncBackend(httpcore.AsyncNetworkBackend):
+    """Route every TCP connection to one validated IP address.
+
+    The HTTP request URL is deliberately left unchanged, so its Host header
+    and TLS SNI/certificate verification still identify the requested domain.
+    Only the socket destination is fixed.
+    """
+
+    def __init__(self, ip: ipaddress._BaseAddress):
+        self._ip = str(ip)
+        self._real = httpcore.AnyIOBackend()
+
+    async def connect_tcp(self, host, port, timeout=None, local_address=None,
+                          socket_options=None):
+        return await self._real.connect_tcp(
+            self._ip, port, timeout, local_address, socket_options
+        )
+
+    async def connect_unix_socket(self, path, timeout=None, socket_options=None):
+        return await self._real.connect_unix_socket(path, timeout, socket_options)
+
+    async def sleep(self, seconds: float) -> None:
+        return await self._real.sleep(seconds)
+
+
+class PinnedAsyncTransport(httpx.AsyncBaseTransport):
+    """HTTP/1.1 transport that pins connects to a validated public IP.
+
+    Use a short-lived client with ``follow_redirects=False``. Redirect targets
+    are a separate outbound URL and must be validated/pinned afresh instead of
+    inheriting this approval.
+    """
+
+    def __init__(self, ip: ipaddress._BaseAddress):
+        self._pool = httpcore.AsyncConnectionPool(
+            ssl_context=ssl.create_default_context(),
+            http1=True,
+            http2=False,
+            network_backend=_PinnedAsyncBackend(ip),
+        )
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        core_request = httpcore.Request(
+            method=request.method,
+            url=httpcore.URL(
+                scheme=request.url.raw_scheme,
+                host=request.url.raw_host,
+                port=request.url.port,
+                target=request.url.raw_path,
+            ),
+            headers=request.headers.raw,
+            content=request.stream,
+            extensions=request.extensions,
+        )
+        try:
+            core_response = await self._pool.handle_async_request(core_request)
+            content = b"".join([chunk async for chunk in core_response.aiter_stream()])
+            await core_response.aclose()
+        except Exception as exc:
+            mapped = _HTTPCORE_TO_HTTPX_EXC.get(type(exc))
+            if mapped is not None:
+                raise mapped(str(exc)) from exc
+            raise
+        return httpx.Response(
+            status_code=core_response.status,
+            headers=core_response.headers,
+            content=content,
+            extensions=core_response.extensions,
+        )
+
+    async def aclose(self) -> None:
+        await self._pool.aclose()

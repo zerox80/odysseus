@@ -1,4 +1,4 @@
-"""Workspace API - browse server directories to pick a tool workspace folder."""
+"""Workspace API limited to the dedicated agent workspace mount."""
 import os
 from fastapi import APIRouter, Request, HTTPException, Query
 
@@ -16,23 +16,24 @@ def setup_workspace_routes():
 
     @router.get("/browse")
     def browse(request: Request, path: str = Query(default="")):
-        """List subdirectories of `path` (default: home) so the UI can navigate
-        the server filesystem and pick a workspace folder. Directories only.
+        """List workspace subdirectories without exposing server directories.
 
-        ADMIN-ONLY: this enumerates the server filesystem, so it is gated the
-        same way the file/shell tools are (read_file/write_file/bash are in
-        NON_ADMIN_BLOCKED_TOOLS). A non-admin who can't use those tools must not
-        be able to map the host's directory tree either.
+        ADMIN-only because it still reveals names in user-managed workspaces,
+        but its root is the same dedicated mount that file and command tools
+        receive. A supplied host path is never probed or reflected back.
         """
         owner = get_current_user(request)
         if not owner_is_admin_or_single_user(owner):
             raise HTTPException(status_code=403, detail="Workspace browsing is admin-only")
 
-        # Resolve symlinks so the reported path is canonical and the UI navigates
-        # real directories (defends against symlink games in displayed paths).
-        target = os.path.realpath(os.path.expanduser(path.strip() or "~"))
-        if not os.path.isdir(target):
-            target = os.path.realpath(os.path.expanduser("~"))
+        from src.tool_execution import _is_within_root, _tool_path_roots, vet_workspace
+
+        root = _tool_path_roots()[0]
+        # Resolve the requested path only after anchoring it below the dedicated
+        # root; an absolute host path is rejected without filesystem probing.
+        requested = (path or "").strip()
+        candidate = root if not requested else os.path.realpath(os.path.expanduser(requested))
+        target = candidate if os.path.isdir(candidate) and _is_within_root(candidate, root) else root
 
         dirs = []
         try:
@@ -54,14 +55,12 @@ def setup_workspace_routes():
         dirs_sorted = sorted(dirs, key=lambda d: d["name"].lower())
         truncated = len(dirs_sorted) > _MAX_BROWSE_DIRS
         parent = os.path.dirname(target)
-        from src.tool_execution import vet_workspace
         return {
             "path": target,
-            "parent": parent if parent and parent != target else None,
+            "parent": parent if parent and parent != target and _is_within_root(parent, root) else None,
             "dirs": dirs_sorted[:_MAX_BROWSE_DIRS],
             "truncated": truncated,
-            # Whether this directory may be bound as a workspace (filesystem
-            # roots and sensitive dirs may be browsed through but not chosen).
+            # Whether this directory can be bound as a workspace.
             "selectable": vet_workspace(target) is not None,
         }
 
@@ -69,11 +68,9 @@ def setup_workspace_routes():
     def vet(request: Request, path: str = Query(default="")):
         """Validate a workspace path without binding it.
 
-        The UI calls this before persisting a manually typed path (/workspace
-        set) so a typo, file path, deleted folder, sensitive dir, or filesystem
-        root is rejected up front with the canonical path returned on success,
-        instead of being stored client-side and silently dropped at chat time.
-        Admin-gated like /browse: it confirms path existence on the host.
+        The UI calls this before persisting a manually typed path. Only
+        directories below the dedicated workspace root are eligible; host paths
+        are rejected without becoming agent workspaces.
         """
         owner = get_current_user(request)
         if not owner_is_admin_or_single_user(owner):

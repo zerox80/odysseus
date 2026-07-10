@@ -47,8 +47,9 @@ if (-not $pyExe) {
 Write-Host ("Using Python: " + $pyExe)
 
 Write-Step "Installing build dependencies"
-& $pyExe -m pip install --upgrade pip --quiet
-& $pyExe -m pip install -r requirements.txt pyinstaller pystray Pillow
+& $pyExe -m pip install --require-hashes -r requirements.txt
+if ($LASTEXITCODE -ne 0) { Fail "Core dependency install failed." }
+& $pyExe -m pip install --require-hashes -r requirements-portable.txt
 if ($LASTEXITCODE -ne 0) { Fail "Dependency install failed." }
 
 Write-Step "Building portable exe bundle"

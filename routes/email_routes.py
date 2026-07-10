@@ -30,16 +30,18 @@ import logging
 import uuid
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
-from fastapi import APIRouter, Query, UploadFile, File, BackgroundTasks, HTTPException, Depends, Request
+from fastapi import APIRouter, Query, BackgroundTasks, HTTPException, Depends, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from src.constants import DATA_DIR
 
 from src.llm_core import llm_call_async
 from src.upload_limits import read_upload_limited, EMAIL_COMPOSE_UPLOAD_MAX_BYTES
+from src.upload_body_limits import parse_limited_multipart_form, uploaded_values
 
 from routes.email_helpers import (
     _strip_think, _extract_reply, _apply_email_style_mechanics, require_owner, require_user, _assert_owns_account,
@@ -53,7 +55,7 @@ from routes.email_helpers import (
     _extract_attachment_text, _list_attachments_from_msg, _has_visible_attachments, _is_likely_signature_image_attachment,
     _extract_attachment_to_disk, _extract_html, _extract_text,
     _fetch_sender_thread_context, _pre_retrieve_context,
-    _EMAIL_REPLY_SYS_PROMPT_BASE, _POOL_HOOKS,
+    _EMAIL_REPLY_SYS_PROMPT_BASE, build_email_reply_messages, _POOL_HOOKS,
     _friendly_email_auth_error,
     SendEmailRequest, ExtractStyleRequest,
     ATTACHMENTS_DIR, COMPOSE_UPLOADS_DIR, SCHEDULED_DB,
@@ -3259,9 +3261,20 @@ def setup_email_routes():
             return {"success": False, "error": "Mail operation failed"}
 
     @router.post("/compose-upload")
-    async def compose_upload(file: UploadFile = File(...), owner: str = Depends(require_owner)):
+    async def compose_upload(
+        request: Request,
+        file: Any = None,
+        owner: str = Depends(require_owner),
+    ):
         """Upload a file for attaching to a compose email. Returns a token."""
         try:
+            if file is None:
+                form = await parse_limited_multipart_form(request, max_files=1)
+                uploads = uploaded_values(form, "file")
+                file = uploads[0] if len(uploads) == 1 else None
+            if not hasattr(file, "read"):
+                raise HTTPException(400, "No attachment uploaded")
+
             # Sanitize filename and generate a unique token
             safe_name = re.sub(r"[^\w\s\-.]", "_", file.filename or "file").strip()
             token = f"{uuid.uuid4().hex}_{safe_name}"
@@ -4530,31 +4543,6 @@ def setup_email_routes():
                 except Exception as _e:
                     logger.warning(f"sender-thread-context failed: {_e}")
 
-            system_prompt = _EMAIL_REPLY_SYS_PROMPT_BASE
-            if style:
-                system_prompt += f"\n\nWRITING STYLE TO MATCH:\n{style}"
-            if context_snippets:
-                system_prompt += "\n\nRELEVANT CONTEXT FROM PAST EMAILS AND CONTACTS:\n" + "\n\n---\n\n".join(context_snippets[:5])
-            if referenced:
-                system_prompt += (
-                    "\n\nREFERENCED MATERIAL — the last few emails from this sender, "
-                    "plus any text extracted from their attachments. Use this to "
-                    "answer numbered questions or refer to documents they previously "
-                    "sent. Do NOT cite this material verbatim unless the sender "
-                    "directly asked about something in it.\n\n" + referenced[:18000]
-                )
-
-            user_msg = (
-                f"Recipient: {to}\nSubject: {subject}\n\n"
-                f"Original email and any current draft:\n{original_body[:6000]}\n\n"
-            )
-            if user_hint:
-                user_msg += (
-                    f"User's instructions for THIS reply (follow these — they override "
-                    f"defaults like length/tone):\n{user_hint[:2000]}\n\n"
-                )
-            user_msg += "Draft a reply. Return only the reply body text."
-
             # Build a candidate chain so a stale session-stored API key
             # (the most common cause of "authentication failed" here)
             # doesn't kill AI Reply outright — fall through to the
@@ -4594,10 +4582,17 @@ def setup_email_routes():
                 _add(*cand)
             for cand in resolve_chat_fallback_candidates(owner=owner) or []:
                 _add(*cand)
-            _messages = [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_msg},
-            ]
+            # Email-derived material is deliberately constructed only as guarded,
+            # untrusted user-role context. The system prompt stays invariant.
+            _messages = build_email_reply_messages(
+                recipient=to,
+                subject=subject,
+                original_body=original_body,
+                user_hint=user_hint,
+                writing_style=style,
+                context_snippets=context_snippets,
+                referenced_material=referenced,
+            )
             try:
                 reply_raw = await llm_call_async_with_fallback(
                     _candidates,
@@ -4619,14 +4614,15 @@ def setup_email_routes():
                     len(reply_raw or ""),
                 )
                 retry_system = (
-                    system_prompt
+                    _EMAIL_REPLY_SYS_PROMPT_BASE
                     + "\n\nRETRY BECAUSE PREVIOUS OUTPUT WAS EMPTY: You MUST return a non-empty email reply body. "
                     "If unsure, write a short, honest reply using only the facts in the original email and user instructions. "
                     "Still use the exact <<<REPLY>>> and <<<END>>> markers."
                 )
-                retry_user = user_msg + "\n\nReturn a usable, non-empty reply now. Do not return an empty marker block."
+                retry_user = "Return a usable, non-empty reply now. Do not return an empty marker block."
                 retry_messages = [
                     {"role": "system", "content": retry_system},
+                    *_messages[1:],
                     {"role": "user", "content": retry_user},
                 ]
                 for cand_url, cand_model, cand_headers in _candidates:

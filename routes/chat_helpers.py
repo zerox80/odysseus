@@ -375,7 +375,57 @@ async def preprocess(
     )
 
 
-def build_uploaded_file_manifest(att_ids: list, upload_handler, owner: Optional[str]) -> list[dict]:
+def _caller_may_use_file_tools(owner: Optional[str]) -> bool:
+    """Whether this session's owner can reach the workspace-backed file tools."""
+    try:
+        from src.tool_security import owner_is_admin_or_single_user
+
+        return owner_is_admin_or_single_user(owner)
+    except Exception:
+        return False
+
+
+def _stage_upload_for_agent_tools(
+    source_path: str, upload_id: str, name: str, workspace: Optional[str]
+) -> Optional[str]:
+    """Copy a current-turn upload into the tool-visible workspace tree.
+
+    Agent file tools and the isolated executor are confined to the dedicated
+    workspace mount; uploads live under DATA_DIR/uploads, outside it. Staging
+    a copy is the only way the agent can re-open an attachment whose inline
+    text was truncated or omitted. The destination is keyed by upload id, so
+    re-sending the same attachment overwrites instead of accumulating copies.
+    """
+    import shutil
+
+    from src.tool_execution import _agent_workspace_root
+
+    stage_root = workspace or _agent_workspace_root()
+    stage_dir = os.path.join(stage_root, "chat_uploads")
+    safe_id = re.sub(r"[^\w.-]+", "_", str(upload_id)) or "upload"
+    safe_name = re.sub(r"[^\w.-]+", "_", os.path.basename(str(name or ""))) or "upload"
+    staged = os.path.join(stage_dir, f"{safe_id}_{safe_name}"[:200])
+    try:
+        os.makedirs(stage_dir, exist_ok=True)
+        if (
+            not os.path.isfile(staged)
+            or os.path.getsize(staged) != os.path.getsize(source_path)
+            or os.path.getmtime(staged) < os.path.getmtime(source_path)
+        ):
+            shutil.copy2(source_path, staged)
+        return staged
+    except OSError:
+        logger.debug("Failed to stage upload %r for agent tools", upload_id, exc_info=True)
+        return None
+
+
+def build_uploaded_file_manifest(
+    att_ids: list,
+    upload_handler,
+    owner: Optional[str],
+    workspace: Optional[str] = None,
+    stage_for_tools: bool = False,
+) -> list[dict]:
     """Resolve current-turn upload IDs into a small tool-facing manifest.
 
     The chat UI already sends attachment ids, and preprocessing inlines as much
@@ -383,6 +433,12 @@ def build_uploaded_file_manifest(att_ids: list, upload_handler, owner: Optional[
     content was truncated/omitted or when the model chooses file tools. Only
     owner-authorized uploads are included, and paths must remain inside the
     configured upload directory.
+
+    File tools are confined to the workspace mount while uploads live under
+    the data dir, so a raw upload path is normally unreadable for them. With
+    ``stage_for_tools`` (agent mode), such uploads are copied into
+    ``workspace``/``chat_uploads`` (or the workspace root) for callers that
+    can use file tools; otherwise the path is reported as None.
     """
     if not att_ids or not upload_handler or not hasattr(upload_handler, "resolve_upload"):
         return []
@@ -394,6 +450,8 @@ def build_uploaded_file_manifest(att_ids: list, upload_handler, owner: Optional[
             return _resolve_tool_path(path) == os.path.realpath(path)
         except Exception:
             return False
+
+    may_stage = stage_for_tools and _caller_may_use_file_tools(owner)
 
     manifest: list[dict] = []
     for att_id in att_ids:
@@ -413,8 +471,18 @@ def build_uploaded_file_manifest(att_ids: list, upload_handler, owner: Optional[
                     inside = bool(upload_handler._inside_upload_dir(path))
                 elif hasattr(upload_handler, "inside_base_dir"):
                     inside = bool(upload_handler.inside_base_dir(path))
-                if not inside or not os.path.exists(path) or not _read_file_can_open(path):
+                if not inside or not os.path.exists(path):
                     path = None
+                elif not _read_file_can_open(path):
+                    staged = None
+                    if may_stage:
+                        staged = _stage_upload_for_agent_tools(
+                            path,
+                            info.get("id") or str(att_id),
+                            info.get("name") or info.get("original_name") or "",
+                            workspace,
+                        )
+                    path = staged if staged and _read_file_can_open(staged) else None
             except Exception:
                 path = None
 
@@ -644,6 +712,7 @@ async def build_chat_context(
     use_enhanced_message: bool = False,
     agent_mode: bool = False,
     allow_tool_preprocessing: bool = True,
+    workspace: Optional[str] = None,
 ) -> ChatContext:
     """Build the full context (preface + messages) for an LLM call.
 
@@ -679,6 +748,10 @@ async def build_chat_context(
         att_ids or [],
         getattr(chat_handler, "upload_handler", None),
         getattr(sess, "owner", None),
+        workspace=workspace,
+        # Only agent turns can follow up with file tools; plain chat gets the
+        # manifest metadata without staging copies into the shared workspace.
+        stage_for_tools=agent_mode,
     )
     casual_low_signal = _is_casual_low_signal(message)
 

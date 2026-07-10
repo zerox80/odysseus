@@ -5,13 +5,14 @@ import logging
 from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional
 
-from fastapi import APIRouter, HTTPException, Query, Request, UploadFile, File, Form
+from fastapi import APIRouter, HTTPException, Query, Request
 
 from sqlalchemy import case, func, or_
 from core.database import SessionLocal, Document, DocumentVersion
 from core.database import Session as DbSession
 from src.auth_helpers import get_current_user, _auth_disabled
 from src.constants import MAIL_ATTACHMENTS_DIR
+from src.upload_body_limits import parse_limited_multipart_form, uploaded_values
 
 logger = logging.getLogger(__name__)
 
@@ -211,8 +212,8 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
     @router.post("/api/documents/import-pdf")
     async def import_pdf(
         request: Request,
-        file: UploadFile = File(...),
-        session_id: Optional[str] = Form(None),
+        file: Any = None,
+        session_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Upload a PDF and create the matching Document.
 
@@ -221,6 +222,16 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
         with a `pdf_source` marker so the viewer renders the pages without
         overlays.
         """
+        if file is None:
+            form = await parse_limited_multipart_form(request, max_files=1)
+            uploads = uploaded_values(form, "file")
+            file = uploads[0] if len(uploads) == 1 else None
+            submitted_session_id = form.get("session_id")
+            if isinstance(submitted_session_id, str):
+                session_id = submitted_session_id
+        if not hasattr(file, "read"):
+            raise HTTPException(400, "No PDF file uploaded")
+
         from src.pdf_forms import has_form_fields, extract_fields
         from src.pdf_form_doc import (
             save_field_sidecar,

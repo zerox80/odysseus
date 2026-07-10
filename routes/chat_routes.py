@@ -147,10 +147,11 @@ def _resolve_request_workspace(request, raw_value) -> tuple:
     let a non-admin chat caller probe which host paths exist.
 
     vet_workspace rejects non-directories, sensitive roots (.ssh, .gnupg,
-    ...), and filesystem roots; on rejection there is no confinement and the
-    default tool-path allowlist applies. The rejected value is surfaced so the
-    stream can tell an admin client (which believes a workspace is active)
-    that it was dropped.
+    ...), filesystem roots, and paths outside the dedicated workspace mount.
+    On rejection there is no extra confinement and tools retain the dedicated
+    workspace-root policy. The rejected value is surfaced so the stream can
+    tell an admin client (which believes a workspace is active) that it was
+    dropped.
     """
     requested = (raw_value or "").strip()
     if not requested:
@@ -784,6 +785,7 @@ def setup_chat_routes(
             # index would be useless / unwanted noise.
             agent_mode=(chat_mode == "agent"),
             allow_tool_preprocessing=allow_tool_preprocessing,
+            workspace=workspace or None,
         )
 
         _research_flags = {"do": do_research}  # Mutable container for generator scope

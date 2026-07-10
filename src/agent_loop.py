@@ -194,12 +194,12 @@ _API_AGENT_RULES = """\
 - You are running INSIDE Odysseus — there is no OpenWebUI, ChatGPT, or external chat backend to query. All chats/sessions live in THIS app and are accessed via `list_sessions` (or `manage_session` with `action=list`), and deleted via `manage_session` with `action=delete`. Do NOT shell out to find sqlite files, curl localhost:8080, or grep for routers — those don't exist here. If `list_sessions` returns rows, that IS the source of truth.
 - After `list_sessions`, preserve the returned `[Chat title](#session-<id>)` links in your user-facing reply. Do not rewrite chat lists as plain tables with non-clickable titles.
 - "Cookbook" = the LLM-serving subsystem (NOT chat sessions, NOT a recipe app). Routing:
-  • "What's running" / "what's serving" / "show my cookbook" / "is anything up" → **first action MUST be `list_served_models` (no args)**. The tool is ALWAYS available. Do not run `ps aux`, do not `curl localhost:8000`, do not `which vllm`. Even if you don't remember seeing the tool listed, it IS available — call it. The output IS the source of truth (it tracks diffusion models, vLLM, SGLang, llama.cpp, Ollama, etc. — anything spawned via the cookbook, including remote hosts that `ps aux` here can't see).
-  • "What's downloading" / "show downloads" → `list_downloads` (always available).
-  • "What models do I have" → `list_cached_models` (always available).
-  • "Kill / stop / shut down" → `stop_served_model` (or `cancel_download`) with the session_id from the list.
+  • "What's running" / "what's serving" / "show my cookbook" / "is anything up" → first try `list_served_models` (no args). If it reports that high-trust Cookbook operations are disabled, explain that an administrator must set `ODYSSEUS_ENABLE_HIGH_TRUST_COOKBOOK=true`; do not bypass this with `bash`, `ssh`, `tmux`, or `app_api`. Otherwise its output is the source of truth (it tracks diffusion models, vLLM, SGLang, llama.cpp, Ollama, etc. — including configured remote hosts that `ps aux` here cannot see).
+  • "What's downloading" / "show downloads" → `list_downloads` when high-trust Cookbook operations are enabled; otherwise explain the opt-in requirement.
+  • "What models do I have" → `list_cached_models` when high-trust Cookbook operations are enabled; otherwise explain the opt-in requirement.
+  • "Kill / stop / shut down" → `stop_served_model` (or `cancel_download`) with the session_id from the list only when high-trust Cookbook operations are enabled.
   • Searching for a model → `search_hf_models`.
-  • Downloading or serving a model → these run on a SERVER. If the user names one ("on gpu-box", "on the gpu box") pass `host=`. If they DON'T name one, the tool defaults to the cookbook's currently-selected server (NOT localhost). When there are multiple servers and it's genuinely ambiguous which they mean, call `list_cookbook_servers` and ask. Only download to localhost when the user explicitly says "locally" / "on this machine" (pass `local=true`).
+  • Downloading or serving a model → these are high-trust operations and require `ODYSSEUS_ENABLE_HIGH_TRUST_COOKBOOK=true`. If it is not enabled, state that constraint and do not attempt another execution route. When enabled, they run on a SERVER: pass a named `host=`, or use the cookbook's selected server; use `local=true` only when the user explicitly requests local execution.
   • Image/inpainting/diffusion serve requests ("serve inpaint", "SDXL inpainting", "image model") → use `serve_model` with the built-in Diffusers command: `python3 scripts/diffusion_server.py --model <repo> --port 8100` (or another free port). Do NOT invent modules like `diffusers_api_server`, and do NOT use bash/ssh/pip directly. The Cookbook route copies `scripts/diffusion_server.py` to remote hosts and registers the image endpoint.
   • Launching a known model ("run SD 3.5", "start the inpaint model", "serve qwen") → **FIRST** `list_serve_presets` to find the saved launch template, **THEN** `serve_preset {name: "..."}`. Do NOT fabricate a tmux command — the user already saved working ones from the UI. Only fall back to raw `serve_model` if no preset matches.
   • Launching a model the user names ("serve minimax m2.7 on gpu-box") with NO preset → `serve_model {repo_id, cmd, host}`. The cookbook route OWNS tmux session creation AND state-file registration AND UI live-refresh — bypassing it produces an orphan the UI can never see. After launching, call `list_served_models` to verify readiness. If it reports a diagnosis and suggested adjusted command, retry with `serve_model` using that command instead of asking the user to debug raw tmux logs.
@@ -291,9 +291,9 @@ _DOMAIN_RULES = {
     "cookbook": """\
 ## Cookbook/model-serving rules
 - Cookbook is the LLM-serving subsystem.
-- "What's running/serving" starts with `list_served_models`. "What's downloading" uses `list_downloads`.
+- "What's running/serving" starts with `list_served_models` only when high-trust Cookbook operations are enabled; otherwise explain the opt-in and never bypass it with shell tooling. "What's downloading" follows the same rule with `list_downloads`.
 - Launch known models by checking `list_serve_presets` before raw `serve_model`.
-- Downloads/serves run on a Cookbook server; pass the named `host` when the user names one.
+- Downloads/serves require `ODYSSEUS_ENABLE_HIGH_TRUST_COOKBOOK=true`; when enabled, pass the named `host` when the user names one.
 - Do not launch model servers manually with bash/ssh/tmux. Use `serve_model`/`serve_preset` so the UI can track and stop them.
 - After a successful serve, verify with `list_served_models`; if an external server is running but invisible, use `adopt_served_model`.""",
     "notes_calendar_tasks": """\
@@ -364,11 +364,7 @@ TOOL_SECTIONS = {
 Run any shell command. Output is returned to you. Use for: installing packages, checking files, git, system info, process management, etc.
 Do NOT use bash/curl for web lookup/search/latest/current requests when `web_search` or `web_fetch` is available.
 NEVER use bash to create or change files — no `>`/`>>` redirects, no heredocs (`cat > f << 'EOF'`), no `tee`, `sed -i`, `awk -i`, no `python -c` that writes. To CREATE or fully rewrite a file use `write_file`; to change part of an existing file use `edit_file`. Those show a diff and are the ONLY allowed way to write files. (bash is for read-only inspection: `ls`, `cat` to READ, `grep`, `git status`/`git diff`, builds, installs.)
-For LONG-running commands (package installs, pip/npm, ffmpeg, model downloads, training, builds — anything that may take more than ~20s), make the FIRST line `#!bg` to run it in the BACKGROUND. You get a job id back immediately and are automatically re-invoked with the full output when it finishes — so you never block the chat waiting. Example:
-```bash
-#!bg
-pip install openai-whisper
-```
+Detached `#!bg` commands are disabled. Keep commands bounded (maximum 120 seconds); do not try to bypass that limit with backgrounding, `nohup`, or a process manager.
 SANDBOX LIMITS: stdin/stdout are pipes, so there is NO interactive terminal — `input()`, `curses`, `termios`, `pygame`, and `tkinter` will all fail. Don't try to RUN interactive terminal games or GUI apps here — verify syntax (`python -c "import py_compile; py_compile.compile('x.py')"`) and tell the user to run it themselves in their own terminal. For anything the USER should play/use interactively (games, UIs, demos), prefer a single self-contained HTML file with `<canvas>` + inline JS — save it via `create_document` with language="html" and tell the user to hit the Run / Preview button (▶) in the document editor toolbar; it renders inline in a sandboxed iframe so the game is playable right there. Works from any machine that can reach the Odysseus UI — no need to copy files out.
 NEVER pipe multi-line Python through `python -c "..."` — shell quoting eats real newlines and `\\n` arrives as literal backslash-n, which Python parses as a line-continuation error on line 1. To run multi-line code, either use the dedicated `python` tool block above, or save to a file first with a quoted HEREDOC (`cat > /tmp/x.py << 'EOF' ... EOF`) and then `python /tmp/x.py`.""",
 
@@ -421,7 +417,7 @@ Edit an EXISTING file by exact string replacement. PREFER this over bash (sed/ec
     "get_workspace": """\
 ```get_workspace
 ```
-Return the absolute path of the active workspace folder. File tools are CONFINED to it (paths can be RELATIVE to it); the shell starts there (cwd) but is NOT sandboxed. Call this first when the user says "the project"/"the code"/"this folder" without a path, instead of asking them. No arguments.""",
+Return the absolute path of the active workspace folder. File tools are CONFINED to it (paths can be RELATIVE to it); shell and Python commands run in an isolated executor with only this workspace mount. Call this first when the user says "the project"/"the code"/"this folder" without a path, instead of asking them. No arguments.""",
 
     "create_document": """\
 ```create_document
@@ -2892,8 +2888,9 @@ async def stream_agent_loop(
                 _relevant_tools.difference_update(_email_fetch_tools)
                 logger.info("[agent-intent] active email draft pruned fetch tools=%s", removed)
 
-    # Current-turn chat uploads are real files under the upload/data root. Make
-    # the read-side file/document tools visible immediately so the agent can
+    # Current-turn chat uploads are staged as real files inside the
+    # tool-visible workspace tree (see build_uploaded_file_manifest). Make the
+    # read-side file/document tools visible immediately so the agent can
     # inspect files whose inline text was truncated or omitted.
     if not guide_only and uploaded_files:
         if _relevant_tools is None:

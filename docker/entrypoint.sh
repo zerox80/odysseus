@@ -13,6 +13,7 @@ set -e
 
 PUID="${PUID:-1000}"
 PGID="${PGID:-1000}"
+SANDBOX_GID="${ODYSSEUS_TOOL_SANDBOX_GID:-65532}"
 GOSU_BIN="$(command -v gosu)"
 PYTHON_BIN="$(command -v python)"
 
@@ -28,6 +29,17 @@ fi
 
 ODY_USER="$(getent passwd "$PUID" | cut -d: -f1)"
 [ -z "$ODY_USER" ] && ODY_USER=odysseus
+
+# The command-executor container runs as 65532 and shares only /workspace
+# with the app. Give the app user supplementary group access to that volume;
+# never use this group for /app/data, SSH material, or Docker-socket access.
+if ! getent group "$SANDBOX_GID" >/dev/null 2>&1; then
+    groupadd -g "$SANDBOX_GID" odysseus_sandbox
+fi
+SANDBOX_GROUP="$(getent group "$SANDBOX_GID" | cut -d: -f1)"
+if [ -n "$SANDBOX_GROUP" ]; then
+    usermod -aG "$SANDBOX_GROUP" "$ODY_USER" 2>/dev/null || true
+fi
 
 # Docker-socket group plumbing for the explicit host-Docker overlay. When
 # opted in, the socket is owned by root:<host docker gid>. Add the app user
@@ -93,12 +105,26 @@ repair_bind_mount_ownership() {
     repair_tree_ownership "$dir"
 }
 
+repair_sandbox_workspace() {
+    mkdir -p /workspace
+    # setgid keeps child files in the dedicated group; group read/write makes
+    # normal agent file tools and sidecar commands interoperable without
+    # granting either container access to app data or host files.
+    chown "$PUID:$SANDBOX_GID" /workspace 2>/dev/null || true
+    chmod 2770 /workspace 2>/dev/null || true
+    find /workspace -xdev -mindepth 1 -not -gid "$SANDBOX_GID" -print0 2>/dev/null \
+        | xargs -0 -r chgrp "$SANDBOX_GID" 2>/dev/null || true
+    find /workspace -xdev -type d -exec chmod g+rws {} + 2>/dev/null || true
+    find /workspace -xdev -type f -exec chmod g+rw {} + 2>/dev/null || true
+}
+
 # Repair image-owned writable paths without walking into bind-mounted host
 # trees, then repair the app-owned mount roots separately.
 repair_app_tree_ownership
 for dir in /app/data /app/logs /app/.ssh /app/.cache/huggingface /app/.local; do
     repair_bind_mount_ownership "$dir"
 done
+repair_sandbox_workspace
 
 # Cookbook installs vllm/etc. via `pip install --user`, which pulls
 # nvidia-cuda-* wheels into /app/.local but does not set CUDA_HOME or
@@ -134,6 +160,11 @@ export VLLM_USE_FLASHINFER_SAMPLER="${VLLM_USE_FLASHINFER_SAMPLER:-0}"
 # Make Cookbook-installed Python CLIs visible after `pip install --user`.
 # vLLM and helper scripts land here because /app is the non-root user's HOME.
 export PATH="/app/.local/bin:$PATH"
+
+# Workspace files must be usable by both the app user and the confined
+# executor's dedicated group. This is stricter than the usual 022 default and
+# applies after the workspace's setgid bit chooses the sandbox group.
+umask 0007
 
 # Run first-time setup as the app user so data/ files get the right ownership.
 # setup.py is idempotent — skips auth.json / .env if they already exist.

@@ -14,9 +14,6 @@ venv/
 .env
 .env.bak.*
 !.env.example
-# Local uv lockfile (optional, per-platform — see "Faster installs with uv" in README)
-requirements.lock
-
 # SOPS workflow — encrypted `secrets.env` is intentionally committable,
 # but every variant (plaintext, manual decrypt copy, editor backup)
 # must stay out of git. Mirrored in .dockerignore so the same artifacts

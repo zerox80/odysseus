@@ -5,7 +5,7 @@ import logging
 import shutil
 import uuid
 from typing import Any, Dict, List, Tuple
-from fastapi import APIRouter, HTTPException, Query, Request, UploadFile, File, Depends
+from fastapi import APIRouter, HTTPException, Query, Request, Depends
 from src.request_models import DirectoryRequest
 from core.constants import BASE_DIR, PERSONAL_DIR, PERSONAL_UPLOADS_DIR
 from src.rag_singleton import get_rag_manager
@@ -13,6 +13,11 @@ from src.auth_helpers import require_privilege, require_user
 from core.middleware import require_admin
 from src.upload_handler import secure_filename
 from src.upload_limits import PERSONAL_UPLOAD_MAX_BYTES
+from src.upload_body_limits import (
+    MAX_PERSONAL_UPLOAD_FILES,
+    parse_limited_multipart_form,
+    uploaded_values,
+)
 
 UPLOADS_DIR = PERSONAL_UPLOADS_DIR
 
@@ -275,13 +280,23 @@ def setup_personal_routes(personal_docs_manager, rag_manager, rag_available):
             logger.error(f"Error removing directory from RAG: {e}")
             raise HTTPException(500, f"Failed to remove directory: {str(e)}")
     
-    @router.post("/upload")
-    async def upload_files_to_rag(request: Request, files: List[UploadFile] = File(...)):
-        """Upload files directly into RAG. Supports text and PDF."""
+    async def _handle_personal_upload(request: Request, files: List[Any] | None = None):
+        # Authorization first: an unprivileged caller gets 403 without the
+        # server doing any multipart parsing/spooling work on its behalf.
         user = require_privilege(request, "can_use_documents")
         rag = _rag()
         if not rag:
             raise HTTPException(503, "RAG system is not available — is the embedding service running?")
+
+        if files is None:
+            form = await parse_limited_multipart_form(
+                request, max_files=MAX_PERSONAL_UPLOAD_FILES
+            )
+            files = uploaded_values(form, "files")
+        elif not isinstance(files, list):
+            files = [files]
+        if not files or any(not hasattr(upload, "read") for upload in files):
+            raise HTTPException(400, "No files uploaded")
 
         upload_dir = _personal_upload_dir_for_owner(user)
 
@@ -344,6 +359,20 @@ def setup_personal_routes(personal_docs_manager, rag_manager, rag_available):
             "indexed_count": total_indexed,
             "failed_count": total_failed,
         }
+
+    @router.post("/upload")
+    async def upload_files_to_rag(request: Request):
+        """Upload files directly into RAG. Supports text and PDF.
+
+        The route takes ONLY ``request``: a declared ``files`` parameter would
+        make FastAPI expect a JSON body and reject real multipart posts with
+        422 before the size-limited ``request.form()`` parser runs.
+        """
+        return await _handle_personal_upload(request)
+
+    # Direct-call seam: service-level tests and internal callers can pass an
+    # explicit file list without going through multipart parsing.
+    upload_files_to_rag.direct_handler = _handle_personal_upload
 
     @router.delete("/file")
     async def delete_file_from_rag(filepath: str = Query(...), owner: str = Depends(require_user), _admin: None = Depends(require_admin)):

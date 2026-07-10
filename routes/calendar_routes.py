@@ -5,9 +5,9 @@ import json
 import re
 import uuid
 from datetime import datetime, date, timedelta
-from typing import Optional, List
+from typing import Any, Optional, List
 
-from fastapi import APIRouter, HTTPException, Request, UploadFile, File
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy import or_, and_
 from dateutil.rrule import rrulestr
@@ -15,6 +15,7 @@ from dateutil.rrule import rrulestr
 from core.database import SessionLocal, CalendarCal, CalendarDeletedEvent, CalendarEvent
 from src.auth_helpers import require_user
 from src.upload_limits import read_upload_limited, ICS_MAX_BYTES
+from src.upload_body_limits import parse_limited_multipart_form, uploaded_values
 
 logger = logging.getLogger(__name__)
 
@@ -1270,8 +1271,18 @@ def setup_calendar_routes() -> APIRouter:
     # upload would OOM.
 
     @router.post("/import")
-    async def import_ics(request: Request, file: UploadFile = File(...), calendar_name: str = ""):
+    async def import_ics(request: Request, file: Any = None, calendar_name: str = ""):
         """Import events from an .ics file (scoped to caller's account)."""
+        if file is None:
+            form = await parse_limited_multipart_form(request, max_files=1)
+            uploads = uploaded_values(form, "file")
+            file = uploads[0] if len(uploads) == 1 else None
+            submitted_calendar_name = form.get("calendar_name")
+            if isinstance(submitted_calendar_name, str):
+                calendar_name = submitted_calendar_name
+        if not hasattr(file, "read"):
+            raise HTTPException(400, "No ICS file uploaded")
+
         from icalendar import Calendar as iCal
 
         owner = _require_user(request)

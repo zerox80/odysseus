@@ -1,0 +1,3 @@
+# Image-only: src/upload_handler.py uses python-magic when Debian's libmagic1
+# is available. Keep it separate from the portable host dependency set.
+python-magic==0.4.27

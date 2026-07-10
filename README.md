@@ -31,10 +31,14 @@
 git clone https://github.com/pewdiepie-archdaemon/odysseus.git
 cd odysseus
 cp .env.example .env
+# Generate a token, then set ODYSSEUS_TOOL_SANDBOX_TOKEN=<value> in .env.
+python -c "import secrets; print(secrets.token_urlsafe(32))"
 docker compose up -d --build
 ```
 
 Open `http://localhost:7000` when the containers are healthy. The first admin password is printed in `docker compose logs odysseus`.
+Compose connects the confined command executor through a private Unix socket;
+the executor has no IP network or host-published port.
 
 Native installs, GPU notes, Windows/macOS instructions, HTTPS, and configuration live in the [setup guide](docs/setup.md).
 

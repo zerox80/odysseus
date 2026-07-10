@@ -724,7 +724,6 @@ async def _cookbook_kill_session(session_id: str, *, remote_host: str = "",
     """
     from src.tool_implementations import _internal_headers, _INTERNAL_BASE  # shared, lives in facade
     import httpx
-    import shlex
     headers = _internal_headers()
     remote = remote_host or ""
     sport = ssh_port or ""
@@ -754,22 +753,24 @@ async def _cookbook_kill_session(session_id: str, *, remote_host: str = "",
             remote, sport = _validate_cookbook_ssh_target(remote, sport)
         except HTTPException as e:
             return {"error": str(getattr(e, "detail", e)), "exit_code": 1}
-        _pf = f"-p {shlex.quote(str(sport))} " if sport and str(sport) != "22" else ""
-        cmd = (
-            f"ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no "
-            f"{_pf}{shlex.quote(remote)} 'tmux kill-session -t {shlex.quote(session_id)}'"
-        )
         target_label = f"{session_id} on {remote}"
     else:
-        cmd = f"tmux kill-session -t {shlex.quote(session_id)}"
         target_label = session_id
 
     try:
+        payload: Dict[str, Any] = {}
+        if remote:
+            payload["remote_host"] = remote
+            if sport:
+                payload["ssh_port"] = sport
         async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.post(f"{_INTERNAL_BASE}/api/shell/exec",
-                                     json={"command": cmd}, headers=headers)
+            resp = await client.post(
+                f"{_INTERNAL_BASE}/api/codex/cookbook/stop/{session_id}",
+                json=payload,
+                headers=headers,
+            )
         if resp.status_code >= 400:
-            return {"error": f"shell/exec returned HTTP {resp.status_code}: {resp.text[:200]}", "exit_code": 1}
+            return {"error": f"cookbook stop returned HTTP {resp.status_code}: {resp.text[:200]}", "exit_code": 1}
         try:
             data = resp.json()
         except Exception:
@@ -826,7 +827,6 @@ async def do_tail_serve_output(content: str, owner: Optional[str] = None) -> Dic
     """
     from src.tool_implementations import _internal_headers, _INTERNAL_BASE  # shared, lives in facade
     import httpx
-    import shlex
     try:
         args = _parse_tool_args(content)
     except ValueError:
@@ -876,31 +876,23 @@ async def do_tail_serve_output(content: str, owner: Optional[str] = None) -> Dic
     # process and survives the crash unchanged. We only fall back to
     # the pane when the log file doesn't exist (older sessions launched
     # before the tmux+tee wrapper was added).
-    log_path = f"/tmp/odysseus-tmux/{session_id}.log"
-    pane_inner = f"tmux capture-pane -t {shlex.quote(session_id)} -p -S -{tail} 2>/dev/null"
-    file_inner = f"tail -n {tail} {shlex.quote(log_path)} 2>/dev/null"
-    inner = (
-        f"if [ -s {shlex.quote(log_path)} ]; then {file_inner}; "
-        f"else {pane_inner}; fi"
-    )
+    host_label = remote or "local"
+    params: Dict[str, Any] = {"tail": tail}
     if remote:
-        _pf = f"-p {shlex.quote(str(sport))} " if sport and str(sport) != "22" else ""
-        cmd = (
-            f"ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no "
-            f"{_pf}{shlex.quote(remote)} {shlex.quote(inner)}"
-        )
-        host_label = remote
-    else:
-        cmd = inner
-        host_label = "local"
+        params["remote_host"] = remote
+    if sport:
+        params["ssh_port"] = sport
     try:
         async with httpx.AsyncClient(timeout=20) as client:
-            resp = await client.post(f"{_INTERNAL_BASE}/api/shell/exec",
-                                     json={"command": cmd}, headers=headers)
+            resp = await client.get(
+                f"{_INTERNAL_BASE}/api/codex/cookbook/output/{session_id}",
+                params=params,
+                headers=headers,
+            )
         if resp.status_code >= 400:
-            return {"error": f"shell/exec returned HTTP {resp.status_code}: {resp.text[:200]}", "exit_code": 1}
+            return {"error": f"cookbook output returned HTTP {resp.status_code}: {resp.text[:200]}", "exit_code": 1}
         data = resp.json() if resp.content else {}
-        output_text = (data.get("stdout") or "").strip()
+        output_text = (data.get("output") or "").strip()
         stderr_text = (data.get("stderr") or "").strip()
         rc = data.get("exit_code")
         if rc not in (None, 0) and not output_text:
@@ -1051,7 +1043,6 @@ async def do_adopt_served_model(content: str, owner: Optional[str] = None) -> Di
     """
     from src.tool_implementations import _internal_headers, _INTERNAL_BASE  # shared, lives in facade
     import httpx
-    import shlex
     try:
         args = _parse_tool_args(content)
     except ValueError:
@@ -1066,89 +1057,50 @@ async def do_adopt_served_model(content: str, owner: Optional[str] = None) -> Di
 
     if not sess or not model:
         return {"error": "tmux_session and model are required", "exit_code": 1}
+    if re.fullmatch(r"[a-zA-Z0-9_-]+", sess) is None:
+        return {"error": "Invalid tmux_session format", "exit_code": 1}
+    try:
+        port = int(port)
+    except (TypeError, ValueError):
+        return {"error": "port must be an integer", "exit_code": 1}
+    if not 1 <= port <= 65535:
+        return {"error": "port must be between 1 and 65535", "exit_code": 1}
 
     # Verify tmux session exists on the target host
     if host:
         try:
-            host, _ = _validate_cookbook_ssh_target(host)
+            host, ssh_port = _validate_cookbook_ssh_target(host, args.get("ssh_port") or "")
         except HTTPException as e:
             return {"error": str(getattr(e, "detail", e)), "exit_code": 1}
+    else:
+        ssh_port = ""
 
     headers = _internal_headers()
-    if host:
-        check = f"ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no {shlex.quote(host)} 'tmux has-session -t {shlex.quote(sess)} 2>&1'"
-    else:
-        check = f"tmux has-session -t {shlex.quote(sess)} 2>&1"
     try:
         async with httpx.AsyncClient(timeout=10) as client:
-            r = await client.post(f"{_INTERNAL_BASE}/api/shell/exec",
-                                  json={"command": check}, headers=headers)
+            r = await client.post(
+                f"{_INTERNAL_BASE}/api/codex/cookbook/adopt",
+                json={
+                    "tmux_session": sess,
+                    "model": model,
+                    "host": host,
+                    "ssh_port": ssh_port,
+                    "port": port,
+                    "name": display_name,
+                },
+                headers=headers,
+            )
             data = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
-        if r.status_code >= 400 or (data.get("exit_code") not in (None, 0)):
-            err = (data.get("stderr") or data.get("error") or r.text[:200]).strip()
+        if r.status_code >= 400 or not data.get("ok"):
+            err = (data.get("detail") or data.get("stderr") or data.get("error") or r.text[:200]).strip()
             return {"error": f"tmux session {sess!r} not found on {host or 'local'}: {err}", "exit_code": 1}
     except Exception as e:
         return {"error": f"verify failed: {e}", "exit_code": 1}
 
-    # Best-effort health check — does port respond to /v1/models?
-    if host:
-        health_cmd = f"ssh -o ConnectTimeout=5 {shlex.quote(host)} 'curl -s -m 3 http://localhost:{int(port)}/v1/models'"
-    else:
-        health_cmd = f"curl -s -m 3 http://localhost:{int(port)}/v1/models"
+    # The dedicated high-trust endpoint verifies the session and writes the
+    # state atomically, so the tool never reimplements state mutation here.
+    adopted_already = bool(data.get("already_tracked"))
     server_up = False
-    try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            r = await client.post(f"{_INTERNAL_BASE}/api/shell/exec",
-                                  json={"command": health_cmd}, headers=headers)
-            body = (r.json() or {}).get("stdout", "") if r.headers.get("content-type", "").startswith("application/json") else ""
-            server_up = '"data"' in body or '"object"' in body
-    except Exception:
-        pass
-
-    # Read+modify+write cookbook state. APPEND a task entry; do NOT
-    # overwrite the whole file (that'd nuke presets).
-    try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            r = await client.get(f"{_INTERNAL_BASE}/api/cookbook/state", headers=headers)
-            state = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
-    except Exception as e:
-        return {"error": f"could not read cookbook state: {e}", "exit_code": 1}
-    if not isinstance(state, dict):
-        state = {}
-    tasks = state.get("tasks") if isinstance(state.get("tasks"), list) else []
-    # Skip duplicate adopt of the same session
-    if any(isinstance(t, dict) and t.get("sessionId") == sess for t in tasks):
-        adopted_already = True
-    else:
-        adopted_already = False
-        import time as _time
-        new_task = {
-            "id": sess,
-            "sessionId": sess,
-            "name": display_name,
-            "type": "serve",
-            "status": "running",
-            "output": (
-                f"Adopted externally-launched session {sess!r} on {host or 'local'}.\n"
-                "Reconnect polling will start streaming tmux output shortly."
-            ),
-            "ts": int(_time.time() * 1000),
-            "payload": {"repo_id": model, "remote_host": host or "", "_cmd": "(adopted — launched outside cookbook)"},
-            "remoteHost": host or "",
-            "sshPort": "",
-            "platform": "linux",
-            "_serveReady": bool(server_up),
-            "_endpointAdded": False,
-            "_adoptedExternally": True,
-        }
-        tasks.append(new_task)
-        state["tasks"] = tasks
-        try:
-            async with httpx.AsyncClient(timeout=10) as client:
-                await client.post(f"{_INTERNAL_BASE}/api/cookbook/state",
-                                  json=state, headers=headers)
-        except Exception as e:
-            return {"error": f"could not save cookbook state: {e}", "exit_code": 1}
 
     # Optionally register as a chat endpoint
     endpoint_msg = ""
@@ -1179,7 +1131,7 @@ async def do_adopt_served_model(content: str, owner: Optional[str] = None) -> Di
         "output": (
             f"Adopted session {sess!r} ({model}) on {host or 'local'}:{port}. "
             + ("Already tracked — skipped state write. " if adopted_already else "Added to cookbook state. ")
-            + ("Server responding. " if server_up else "Server not responding yet (still loading?). ")
+            + ("Server responding. " if server_up else "Readiness is reported by Cookbook task status. ")
             + endpoint_msg
         ).strip(),
         "session_id": sess,

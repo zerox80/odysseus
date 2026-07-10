@@ -1,0 +1,5 @@
+# Windows portable-build tooling. This is installed only by
+# build-windows-portable.ps1 after the core hash lock.
+pyinstaller
+pystray
+Pillow

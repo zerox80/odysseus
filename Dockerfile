@@ -3,13 +3,18 @@
 # which raises KeyError on Python 3.13+ (PEP 667). Build patched wheels here so
 # the final image / Cookbook never has to compile the broken sdists. See
 # docker/build-realesrgan-wheels.sh for the full rationale.
-FROM python:3.14-slim AS realesrgan-wheels
+FROM python:3.14-slim@sha256:b877e50bd90de10af8d82c57a022fc2e0dc731c5320d762a27986facfc3355c1 AS realesrgan-wheels
 RUN apt-get update && apt-get install -y --no-install-recommends curl \
     && rm -rf /var/lib/apt/lists/*
+COPY docker/realesrgan-build-requirements.txt /tmp/realesrgan-build-requirements.txt
+RUN pip install --no-cache-dir --require-hashes -r /tmp/realesrgan-build-requirements.txt
 COPY docker/build-realesrgan-wheels.sh /usr/local/bin/build-realesrgan-wheels.sh
 RUN bash /usr/local/bin/build-realesrgan-wheels.sh /wheels
 
-FROM python:3.14-slim
+FROM python:3.14-slim@sha256:b877e50bd90de10af8d82c57a022fc2e0dc731c5320d762a27986facfc3355c1
+
+# Fail RUN steps when any command in a pipe fails, not only the last one.
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 # System deps. tmux is required by Cookbook for background downloads/serves.
 # openssh-client is required for Cookbook remote server tests, setup, probes,
@@ -50,36 +55,41 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # regressing pip/venv installs on hosts without libmagic. Debian always has the
 # lib here, so the import is instant and detection actually works.
 
-# Docker CLI (client only — daemon stays on the host via the
-# /var/run/docker.sock mount). The Debian `docker.io` package ships
-# dockerd but not the client binary on slim, so grab the static client
-# tarball from download.docker.com instead.
+# Docker CLI client only. The default Compose topology does not mount a Docker
+# socket; this client becomes usable only after the explicit host-Docker opt-in
+# is enabled. The Debian `docker.io` package ships dockerd but not the client
+# binary on slim, so grab the static client tarball from download.docker.com.
 ARG DOCKER_CLI_VERSION=27.5.1
+ARG DOCKER_CLI_SHA256_AMD64=4f798b3ee1e0140eab5bf30b0edc4e84f4cdb53255a429dc3bbae9524845d640
+ARG DOCKER_CLI_SHA256_ARM64=e6b53725a73763ab3f988c73f8772eaed429754c1a579db5ff11f21990fd1817
 RUN ARCH="$(dpkg --print-architecture)" \
     && case "$ARCH" in \
-         amd64) DARCH=x86_64 ;; \
-         arm64) DARCH=aarch64 ;; \
+         amd64) DARCH=x86_64; DOCKER_CLI_SHA256="$DOCKER_CLI_SHA256_AMD64" ;; \
+         arm64) DARCH=aarch64; DOCKER_CLI_SHA256="$DOCKER_CLI_SHA256_ARM64" ;; \
          *) echo "unsupported arch $ARCH"; exit 1 ;; \
        esac \
     && curl -fsSL "https://download.docker.com/linux/static/stable/${DARCH}/docker-${DOCKER_CLI_VERSION}.tgz" \
        -o /tmp/docker.tgz \
+    && echo "${DOCKER_CLI_SHA256}  /tmp/docker.tgz" | sha256sum -c - \
     && tar -xzf /tmp/docker.tgz -C /tmp \
     && install -m 0755 /tmp/docker/docker /usr/local/bin/docker \
     && rm -rf /tmp/docker /tmp/docker.tgz
 
 WORKDIR /app
 
-# Install Python deps first (layer cache). Optional extras (PyMuPDF AGPL, etc.)
-# are opt-in so the default image stays MIT-core; see requirements-optional.txt.
+# Install Python deps first (layer cache). These committed locks were generated
+# with Python 3.14 and include SHA-256 hashes; `--require-hashes` turns a
+# changed/missing artifact into a hard build failure. Optional extras (PyMuPDF
+# AGPL, etc.) remain opt-in; their lock is standalone and includes the core
+# dependency graph so resolver drift cannot cross the optional boundary.
 ARG INSTALL_OPTIONAL=false
-COPY requirements.txt requirements-optional.txt ./
-RUN pip install --no-cache-dir -r requirements.txt \
-    && if [ "$INSTALL_OPTIONAL" = "true" ]; then pip install --no-cache-dir -r requirements-optional.txt; fi
-
-# python-magic powers content-based MIME sniffing in src/upload_handler.py.
-# Image-only (not in requirements.txt) because it needs the libmagic1 system
-# lib installed above; see the apt note near the top of this stage.
-RUN pip install --no-cache-dir python-magic==0.4.27
+COPY requirements.txt requirements-optional.txt requirements-container.txt ./
+RUN if [ "$INSTALL_OPTIONAL" = "true" ]; then \
+        pip install --no-cache-dir --require-hashes -r requirements-optional.txt; \
+    else \
+        pip install --no-cache-dir --require-hashes -r requirements.txt; \
+    fi \
+    && pip install --no-cache-dir --require-hashes -r requirements-container.txt
 
 # Pre-install the patched basicsr/gfpgan/facexlib wheels built in the
 # realesrgan-wheels stage (--no-deps keeps the image lean — torch & friends are
@@ -87,14 +97,14 @@ RUN pip install --no-cache-dir python-magic==0.4.27
 # satisfied, the Cookbook's plain `pip install realesrgan` resolves them from
 # wheels instead of rebuilding the sdists that fail on Python 3.14.
 COPY --from=realesrgan-wheels /wheels/ /tmp/odysseus-wheels/
-RUN pip install --no-cache-dir --no-deps /tmp/odysseus-wheels/*.whl \
+RUN pip install --no-cache-dir --no-index --no-deps /tmp/odysseus-wheels/*.whl \
     && rm -rf /tmp/odysseus-wheels
 
 # Copy app code
 COPY . .
 
 # Create data directory (mount a volume here for persistence)
-RUN mkdir -p data logs services/cache/search
+RUN mkdir -p data logs services/cache/search /workspace
 
 # Entrypoint that drops to PUID/PGID (default 1000:1000) and repairs
 # ownership on the bind-mounted /app/data and /app/logs. Without this,

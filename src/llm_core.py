@@ -1936,8 +1936,15 @@ async def llm_call_async(
     session_id: Optional[str] = None,
     reasoning_effort: Optional[str] = None,
     workload: str = "foreground",
+    pinned_ip: Optional[Any] = None,
 ) -> str:
-    """Asynchronous LLM call using httpx with connection pooling, timeout, retry logic, and performance logging."""
+    """Asynchronous LLM call using HTTPX with retry and timeout handling.
+
+    ``pinned_ip`` is reserved for user-supplied public endpoints. It forces a
+    short-lived transport to connect only to the address that passed the
+    current DNS validation, instead of allowing a second lookup to rebind to
+    an internal network.
+    """
     provider = _detect_provider(url)
     messages_copy = _sanitize_llm_messages(messages)
 
@@ -1961,6 +1968,10 @@ async def llm_call_async(
         return cached_response
 
     if provider == "chatgpt-subscription":
+        if pinned_ip is not None:
+            # stream_llm has its own transport path. Never silently hand a
+            # user-controlled endpoint to it without the pinning guarantee.
+            raise HTTPException(400, "Pinned direct endpoints do not support the subscription provider")
         # ChatGPT/Codex requires streamed Responses requests even for callers
         # that want a plain string (auto-title, memory extraction, etc.).
         # Reuse stream_llm's validated Codex SSE path and collect deltas.
@@ -2051,8 +2062,29 @@ async def llm_call_async(
         try:
             async with _local_model_slot(target_url, model, workload):
                 note_model_activity(target_url, model)
-                client = _get_http_client()
-                r = await httpx_post_kimi_aware_async(client, target_url, h, json=payload, timeout=call_timeout)
+                if pinned_ip is None:
+                    client = _get_http_client()
+                    r = await httpx_post_kimi_aware_async(
+                        client, target_url, h, json=payload, timeout=call_timeout,
+                    )
+                else:
+                    # A temporary, no-redirect client is intentional. Its
+                    # transport uses the IP resolved/validated for this exact
+                    # direct endpoint, while Host and TLS SNI remain the URL's
+                    # hostname. Proxies are disabled so they cannot become an
+                    # unpinned alternate route.
+                    from src.url_security import PinnedAsyncTransport
+
+                    transport = PinnedAsyncTransport(pinned_ip)
+                    async with httpx.AsyncClient(
+                        timeout=call_timeout,
+                        follow_redirects=False,
+                        trust_env=False,
+                        transport=transport,
+                    ) as pinned_client:
+                        r = await httpx_post_kimi_aware_async(
+                            pinned_client, target_url, h, json=payload, timeout=call_timeout,
+                        )
             duration = time.time() - start
             if not r.is_success:
                 friendly = _format_upstream_error(r.status_code, r.text, target_url)

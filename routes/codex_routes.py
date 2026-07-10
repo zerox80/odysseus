@@ -7,6 +7,8 @@ user data.
 
 import asyncio
 import json
+import shlex
+import tempfile
 import zipfile
 from io import BytesIO
 from pathlib import Path
@@ -19,6 +21,10 @@ from core.middleware import require_admin
 from src.auth_helpers import require_authenticated_request, require_user
 from src.tool_implementations import do_manage_notes
 from src.constants import COOKBOOK_STATE_FILE
+from src.high_trust_operations import (
+    HIGH_TRUST_COOKBOOK_HINT,
+    high_trust_cookbook_enabled,
+)
 from routes._validators import validate_remote_host, validate_ssh_port
 
 
@@ -38,23 +44,109 @@ DOCS_WRITE_SCOPES = {"documents:write"}
 WRITE_ACTIONS = {"add", "create", "new", "save", "remind", "update", "delete", "toggle_item", "remove", "remove_item"}
 
 
-def _ssh_prefix_for_task(task: dict) -> tuple[str, str]:
-    """Resolve a cookbook task's stored SSH target into ``(host, port_flag)``.
+_HIGH_TRUST_MAX_OUTPUT_BYTES = 200_000
 
-    ``host`` is ``""`` for a local task. ``remoteHost`` / ``sshPort`` come from
-    cookbook_state.json and get interpolated into an ``ssh`` command string, so
-    validate them the same way the cookbook routes do. A tampered entry with
-    shell metacharacters in ``remoteHost`` is rejected with 400 rather than
-    injected.
+
+async def _drain_process_stream(stream, limit: int = _HIGH_TRUST_MAX_OUTPUT_BYTES) -> tuple[bytes, bool]:
+    """Drain a short-lived operation without retaining unbounded output."""
+    chunks: list[bytes] = []
+    retained = 0
+    truncated = False
+    while True:
+        chunk = await stream.read(64 * 1024)
+        if not chunk:
+            break
+        available = max(0, limit - retained)
+        if available:
+            chunks.append(chunk[:available])
+            retained += min(len(chunk), available)
+        if len(chunk) > available:
+            truncated = True
+    return b"".join(chunks), truncated
+
+
+async def _run_high_trust_cookbook_command(argv: list[str], *, timeout: float) -> dict[str, Any]:
+    """Run one fixed Cookbook operation after the explicit deployment opt-in.
+
+    This is deliberately argv-only and private to the narrow Cookbook routes
+    below.  It is not a generic shell executor: callers supply only fixed
+    tmux/ssh command shapes whose variable fields were validated first.
     """
-    raw_host = task.get("remoteHost")
-    raw_port = task.get("sshPort")
-    host_value = str(raw_host).strip() if raw_host is not None else None
-    port_value = str(raw_port).strip() if raw_port is not None else None
-    host = validate_remote_host(host_value or None) or ""
-    ssh_port = validate_ssh_port(port_value or None) or ""
-    port_flag = f"-p {ssh_port} " if ssh_port and ssh_port != "22" else ""
-    return host, port_flag
+    if not high_trust_cookbook_enabled():
+        raise HTTPException(403, HIGH_TRUST_COOKBOOK_HINT)
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *argv,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    except FileNotFoundError:
+        return {
+            "exit_code": 127,
+            "stdout": "",
+            "stderr": f"Required Cookbook executable is unavailable: {argv[0]}",
+        }
+    except OSError as exc:
+        return {"exit_code": 1, "stdout": "", "stderr": str(exc)}
+
+    stdout_task = asyncio.create_task(_drain_process_stream(proc.stdout))
+    stderr_task = asyncio.create_task(_drain_process_stream(proc.stderr))
+    wait_task = asyncio.create_task(proc.wait())
+    try:
+        (stdout, stdout_truncated), (stderr, stderr_truncated), exit_code = await asyncio.wait_for(
+            asyncio.gather(stdout_task, stderr_task, wait_task),
+            timeout=max(1.0, min(float(timeout), 30.0)),
+        )
+    except asyncio.TimeoutError:
+        proc.kill()
+        await asyncio.gather(stdout_task, stderr_task, wait_task, return_exceptions=True)
+        return {"exit_code": 124, "stdout": "", "stderr": "Cookbook operation timed out"}
+
+    if stdout_truncated:
+        stdout += b"\n[output truncated]"
+    if stderr_truncated:
+        stderr += b"\n[output truncated]"
+    return {
+        "exit_code": exit_code,
+        "stdout": stdout.decode("utf-8", errors="replace"),
+        "stderr": stderr.decode("utf-8", errors="replace"),
+    }
+
+
+def _high_trust_ssh_argv(host: str, ssh_port: str, remote_command: str) -> list[str]:
+    """Build the sole SSH shape used by narrow Cookbook monitor controls."""
+    argv = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5"]
+    if ssh_port and ssh_port != "22":
+        argv.extend(["-p", ssh_port])
+    return [*argv, host, remote_command]
+
+
+def _cookbook_task_target(
+    task: dict | None,
+    *,
+    remote_host: str | None = None,
+    ssh_port: str | None = None,
+) -> tuple[str, str]:
+    """Validate a task target, optionally using an explicit agent override."""
+    task = task or {}
+    raw_host = remote_host if remote_host is not None else task.get("remoteHost")
+    raw_port = ssh_port if ssh_port is not None else task.get("sshPort")
+    host = validate_remote_host(str(raw_host).strip() if raw_host else None) or ""
+    port = validate_ssh_port(str(raw_port).strip() if raw_port else None) or ""
+    return host, port
+
+
+def _read_local_session_log_tail(session_id: str, tail: int) -> str | None:
+    """Read a bounded local Cookbook log without starting a shell."""
+    log_path = Path(tempfile.gettempdir()) / "odysseus-tmux" / f"{session_id}.log"
+    try:
+        with log_path.open("rb") as handle:
+            handle.seek(0, 2)
+            handle.seek(max(0, handle.tell() - _HIGH_TRUST_MAX_OUTPUT_BYTES))
+            text = handle.read().decode("utf-8", errors="replace")
+    except OSError:
+        return None
+    return "\n".join(text.splitlines()[-tail:])
 
 
 async def _as_owner(request: Request, owner: str, fn, *args, **kwargs):
@@ -122,6 +214,12 @@ def _require_cookbook_scope(request: Request, allowed: set[str]) -> str:
     if not getattr(request.state, "api_token", False):
         require_admin(request)
     return owner
+
+
+def _require_high_trust_cookbook() -> None:
+    """Reject host/SSH-backed Cookbook actions without deployment opt-in."""
+    if not high_trust_cookbook_enabled():
+        raise HTTPException(403, HIGH_TRUST_COOKBOOK_HINT)
 
 
 def _find_endpoint(router: APIRouter | None, method: str, path: str):
@@ -205,7 +303,11 @@ def setup_codex_routes(
                 },
                 "cookbook": {
                     "read": scoped(COOKBOOK_READ_SCOPES),
-                    "launch": scoped(COOKBOOK_LAUNCH_SCOPES),
+                    "launch": (
+                        scoped(COOKBOOK_LAUNCH_SCOPES)
+                        and high_trust_cookbook_enabled()
+                    ),
+                    "high_trust_host_operations": high_trust_cookbook_enabled(),
                     "actions": ["tasks", "servers", "output", "serve", "stop"],
                 },
             },
@@ -517,33 +619,10 @@ def setup_codex_routes(
     # would do by hand in the Cookbook UI: read the current task list +
     # tmux output, launch a serve task, stop one.  Two scopes:
     #   cookbook:read   — list tasks + tail output + list servers
-    #   cookbook:launch — also start/stop serves (host shell exec)
-    # `cookbook:launch` is genuinely powerful: /api/model/serve runs SSH'd
-    # commands on the user's hosts. The existing _validate_serve_cmd
-    # allowlist (vllm/python3/sglang/llama-server/etc., no shell metachars)
-    # keeps the agent inside the same sandbox the UI uses.
-
-    async def _run_shell(cmd: str, timeout: float = 15.0) -> dict:
-        """Run a shell command, return {exit_code, stdout, stderr}."""
-        import asyncio as _asyncio
-        try:
-            proc = await _asyncio.create_subprocess_shell(
-                cmd,
-                stdout=_asyncio.subprocess.PIPE,
-                stderr=_asyncio.subprocess.PIPE,
-            )
-            try:
-                stdout_b, stderr_b = await _asyncio.wait_for(proc.communicate(), timeout=timeout)
-            except _asyncio.TimeoutError:
-                proc.kill()
-                return {"exit_code": -1, "stdout": "", "stderr": "timed out"}
-            return {
-                "exit_code": proc.returncode,
-                "stdout": stdout_b.decode(errors="replace"),
-                "stderr": stderr_b.decode(errors="replace"),
-            }
-        except Exception as exc:
-            return {"exit_code": -1, "stdout": "", "stderr": str(exc)}
+    #   cookbook:launch — host/SSH actions require explicit high-trust opt-in
+    # Host- or SSH-backed monitoring and control are high-trust operations:
+    # disabled by default and only exposed after the deployment opt-in.
+    # Generic shell tools never fall back to the application host.
 
     def _read_cookbook_state() -> dict:
         from pathlib import Path as _Path
@@ -592,8 +671,15 @@ def setup_codex_routes(
         return {"servers": cleaned}
 
     @router.get("/cookbook/output/{session_id}")
-    async def codex_cookbook_output(request: Request, session_id: str, tail: int = 400):
+    async def codex_cookbook_output(
+        request: Request,
+        session_id: str,
+        tail: int = 400,
+        remote_host: str | None = None,
+        ssh_port: str | None = None,
+    ):
         _require_cookbook_scope(request, COOKBOOK_READ_SCOPES)
+        _require_high_trust_cookbook()
         # Defensive: session_id must be the tmux-style id we issue
         # (`serve-XXXX` / `cookbook-XXXX` / `queue-XXXX`); anything else
         # would let the agent run arbitrary `tmux capture-pane` targets.
@@ -608,23 +694,37 @@ def setup_codex_routes(
         task = next((t for t in tasks if t.get("sessionId") == session_id), None)
         if task is None:
             raise HTTPException(404, "task not found")
-        host, port_flag = _ssh_prefix_for_task(task)
+        host, target_ssh_port = _cookbook_task_target(
+            task,
+            remote_host=remote_host,
+            ssh_port=ssh_port,
+        )
         # Prefer the persisted log file over the tmux pane. The pane gets
         # overwritten by the post-crash neofetch banner + bash prompt the
         # moment vllm exits; the log file is the raw stdout/stderr and
         # survives unchanged. Falls back to pane for older tasks predating
         # the tee-to-log runner change.
-        log_path = f"/tmp/odysseus-tmux/{session_id}.log"
-        inner = (
-            f"if [ -s {log_path} ]; then tail -n {tail} {log_path}; "
-            f"else tmux capture-pane -t {session_id} -p -S -{tail}; fi"
-        )
         if host:
-            import shlex
-            cmd = f"ssh {port_flag}{host} {shlex.quote(inner)}"
+            log_path = f"/tmp/odysseus-tmux/{session_id}.log"
+            session_q = shlex.quote(session_id)
+            log_q = shlex.quote(log_path)
+            inner = (
+                f"if [ -s {log_q} ]; then tail -n {tail} {log_q}; "
+                f"else tmux capture-pane -t {session_q} -p -S -{tail}; fi"
+            )
+            result = await _run_high_trust_cookbook_command(
+                _high_trust_ssh_argv(host, target_ssh_port, inner),
+                timeout=15,
+            )
         else:
-            cmd = inner
-        result = await _run_shell(cmd, timeout=15)
+            output = await asyncio.to_thread(_read_local_session_log_tail, session_id, tail)
+            if output is not None:
+                result = {"exit_code": 0, "stdout": output, "stderr": ""}
+            else:
+                result = await _run_high_trust_cookbook_command(
+                    ["tmux", "capture-pane", "-t", session_id, "-p", "-S", f"-{tail}"],
+                    timeout=15,
+                )
         return {
             "session_id": session_id,
             "host": host or "local",
@@ -636,6 +736,7 @@ def setup_codex_routes(
     @router.post("/cookbook/serve")
     async def codex_cookbook_serve(request: Request, body: dict[str, Any] = Body(default_factory=dict)):
         _require_cookbook_scope(request, COOKBOOK_LAUNCH_SCOPES)
+        _require_high_trust_cookbook()
         # Wraps /api/model/serve with the SAME validation the UI uses.
         # _validate_serve_cmd (called inside model_serve) rejects shell
         # metachars and requires the leading binary to be in the
@@ -673,21 +774,41 @@ def setup_codex_routes(
         return await serve_endpoint(request, req)
 
     @router.post("/cookbook/stop/{session_id}")
-    async def codex_cookbook_stop(request: Request, session_id: str):
+    async def codex_cookbook_stop(
+        request: Request,
+        session_id: str,
+        body: dict[str, Any] = Body(default_factory=dict),
+    ):
         _require_cookbook_scope(request, COOKBOOK_LAUNCH_SCOPES)
+        _require_high_trust_cookbook()
         import re as _re
         if not _re.fullmatch(r"[a-zA-Z0-9_-]+", session_id):
             raise HTTPException(400, "Invalid session id")
         state = _read_cookbook_state()
         tasks = state.get("tasks") or []
         task = next((t for t in tasks if t.get("sessionId") == session_id), None)
-        host, port_flag = _ssh_prefix_for_task(task or {})
+        host, target_ssh_port = _cookbook_task_target(
+            task,
+            remote_host=body.get("remote_host") if "remote_host" in body else body.get("host"),
+            ssh_port=body.get("ssh_port") if "ssh_port" in body else None,
+        )
         if host:
-            cmd = f"ssh {port_flag}{host} \"tmux kill-session -t {session_id}\""
+            result = await _run_high_trust_cookbook_command(
+                _high_trust_ssh_argv(host, target_ssh_port, f"tmux kill-session -t {shlex.quote(session_id)}"),
+                timeout=10,
+            )
         else:
-            cmd = f"tmux kill-session -t {session_id}"
-        result = await _run_shell(cmd, timeout=10)
-        return {"session_id": session_id, "exit_code": result.get("exit_code"), "host": host or "local"}
+            result = await _run_high_trust_cookbook_command(
+                ["tmux", "kill-session", "-t", session_id],
+                timeout=10,
+            )
+        return {
+            "session_id": session_id,
+            "exit_code": result.get("exit_code"),
+            "host": host or "local",
+            "stdout": result.get("stdout", ""),
+            "stderr": result.get("stderr", ""),
+        }
 
     @router.get("/cookbook/cached")
     async def codex_cookbook_cached(request: Request, host: str | None = None):
@@ -695,6 +816,7 @@ def setup_codex_routes(
         Mirrors `list_cached_models` from the chat agent so external agents have
         the same inventory view before deciding what to serve/download."""
         _require_cookbook_scope(request, COOKBOOK_READ_SCOPES)
+        _require_high_trust_cookbook()
         # Hit /api/model/cached internally, with the same modelDirs the chat
         # agent's list_cached_models would resolve from cookbook state.
         state = _read_cookbook_state()
@@ -777,6 +899,7 @@ def setup_codex_routes(
         """Launch a saved preset by name. Reuses the working cmd + host the
         user already saved, avoiding the cmd-allowlist trial-and-error loop."""
         _require_cookbook_scope(request, COOKBOOK_LAUNCH_SCOPES)
+        _require_high_trust_cookbook()
         import re as _re
         if not _re.fullmatch(r"[A-Za-z0-9 _.:@\-]+", name):
             raise HTTPException(400, "Invalid preset name")
@@ -824,29 +947,41 @@ def setup_codex_routes(
 
     @router.post("/cookbook/adopt")
     async def codex_cookbook_adopt(request: Request, body: dict[str, Any] = Body(default_factory=dict)):
-        """Adopt an existing tmux session (one started via raw ssh+tmux) into
-        cookbook tracking. Needed when serve_model rejects a cmd and the
-        agent falls back to direct ssh — without adoption the session is
-        invisible to the UI. Body: {tmux_session, model, host?, port?}."""
+        """Adopt an administrator-launched tmux session into Cookbook tracking.
+
+        This high-trust operation makes an existing trusted session visible to
+        the UI. Body: {tmux_session, model, host?, port?}."""
         _require_cookbook_scope(request, COOKBOOK_LAUNCH_SCOPES)
+        _require_high_trust_cookbook()
         norm = dict(body or {})
         sess = (norm.get("tmux_session") or norm.get("session_id") or "").strip()
         model = (norm.get("model") or norm.get("repo_id") or "").strip()
         host = validate_remote_host((norm.get("host") or norm.get("remote_host") or "").strip() or None) or ""
-        port = norm.get("port") or 8000
+        target_ssh_port = validate_ssh_port(str(norm.get("ssh_port") or "").strip() or None) or ""
+        try:
+            port = int(norm.get("port") or 8000)
+        except (TypeError, ValueError):
+            raise HTTPException(400, "port must be an integer")
+        if not 1 <= port <= 65535:
+            raise HTTPException(400, "port must be between 1 and 65535")
+        display_name = str(norm.get("name") or "").strip() or (model.split("/")[-1] if "/" in model else model)
         import re as _re
         if not sess or not _re.fullmatch(r"[a-zA-Z0-9_-]+", sess):
             raise HTTPException(400, "tmux_session required, [a-zA-Z0-9_-]+ only")
         if not model:
             raise HTTPException(400, "model required")
         # Verify the tmux session exists on the target host before adopting.
-        import shlex
         if host:
-            check = f"ssh {shlex.quote(host)} 'tmux has-session -t {shlex.quote(sess)}'"
+            check = await _run_high_trust_cookbook_command(
+                _high_trust_ssh_argv(host, target_ssh_port, f"tmux has-session -t {shlex.quote(sess)}"),
+                timeout=8,
+            )
         else:
-            check = f"tmux has-session -t {shlex.quote(sess)}"
-        chk = await _run_shell(check, timeout=8)
-        if chk.get("exit_code") not in (0, None):
+            check = await _run_high_trust_cookbook_command(
+                ["tmux", "has-session", "-t", sess],
+                timeout=8,
+            )
+        if check.get("exit_code") not in (0, None):
             raise HTTPException(404, f"tmux session {sess!r} not found on {host or 'local'}")
         # Write into cookbook_state.json.
         import time as _t, json as _json
@@ -862,12 +997,12 @@ def setup_codex_routes(
             return {"ok": True, "already_tracked": True, "session_id": sess}
         tasks.append({
             "id": sess, "sessionId": sess,
-            "name": model.split("/")[-1] if "/" in model else model,
+            "name": display_name,
             "type": "serve", "status": "running",
             "output": f"Adopted externally-launched session {sess!r} on {host or 'local'}.",
             "ts": int(_t.time() * 1000),
-            "payload": {"repo_id": model, "remote_host": host, "_cmd": "(adopted — launched outside cookbook)", "port": int(port)},
-            "remoteHost": host, "sshPort": "", "platform": "linux",
+            "payload": {"repo_id": model, "remote_host": host, "_cmd": "(adopted — launched outside cookbook)", "port": port},
+            "remoteHost": host, "sshPort": target_ssh_port, "platform": "linux",
             "_serveReady": False, "_endpointAdded": False, "_adoptedExternally": True,
         })
         try:

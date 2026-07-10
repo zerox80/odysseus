@@ -72,6 +72,9 @@ class Session:
     headers: Optional[Dict[str, str]] = None
     history: List[ChatMessage] = None
     owner: Optional[str] = None
+    # Records whether a session endpoint came from a user-supplied public URL.
+    # Such sessions must be revalidated and IP-pinned on every API-chat call.
+    outbound_url_policy: str = "configured"
     is_important: bool = False
     message_count: int = 0
 

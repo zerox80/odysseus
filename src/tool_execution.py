@@ -28,15 +28,29 @@ from src.tool_security import (
     owner_is_admin_or_single_user,
 )
 from src.tool_policy import ToolPolicy
+from src.high_trust_operations import (
+    HIGH_TRUST_COOKBOOK_HINT,
+    high_trust_cookbook_enabled,
+)
 from src.constants import MAX_OUTPUT_CHARS, MAX_READ_CHARS, MAX_DIFF_LINES, DATA_DIR
 from src.tool_utils import _truncate, get_mcp_manager
 
-# Persistent working directory for agent subprocesses.
-# Resolves to <repo_root>/data, which is the bind-mounted volume in Docker
-# (/app/data) and the local data directory for manual installs.
-# Using this as cwd and HOME prevents the agent from silently creating files
-# in ephemeral container layers that are lost on the next rebuild.
-_AGENT_WORKDIR = DATA_DIR
+def _agent_workspace_root() -> str:
+    """Return the sole filesystem tree exposed to agent file tools.
+
+    Docker deployments bind this to ``/workspace`` in both the application and
+    the isolated command-executor container. Native installs use a dedicated
+    subdirectory of ``DATA_DIR`` by default. The broader data directory is not
+    an agent workspace because it can contain application state and secrets.
+    """
+    configured = os.environ.get("ODYSSEUS_AGENT_WORKSPACE_ROOT", "").strip()
+    root = configured or os.path.join(DATA_DIR, "workspace")
+    return os.path.realpath(os.path.expanduser(root))
+
+
+# Compatibility constant for callers/tests that import it. Runtime resolution
+# below intentionally consults the environment for every request.
+_AGENT_WORKDIR = _agent_workspace_root()
 
 
 
@@ -90,7 +104,11 @@ def _is_sensitive_path(resolved: str) -> bool:
     the lowercase form, so a case-sensitive check would let it slip past the
     deny-list in every file tool that relies on it.
     """
-    parts = [p.casefold() for p in resolved.split(os.sep)]
+    # The test suite and some imported workspace metadata can contain POSIX
+    # paths while the application runs on Windows (and vice versa).  Treat
+    # both separators as path separators so a ``/.ssh/`` component cannot
+    # bypass the deny-list merely because it came from another platform.
+    parts = [p.casefold() for p in re.split(r"[\\/]+", str(resolved)) if p]
     filename = parts[-1] if parts else ""
 
     # Check if any path component is a sensitive directory.
@@ -103,52 +121,34 @@ def _is_sensitive_path(resolved: str) -> bool:
 
 
 def _tool_path_roots() -> list[str]:
-    """Return the list of directory roots that read_file / write_file
-    may touch. Default: project data/ + system temp dirs. Extra roots
-    are loaded from the ``tool_path_extra_roots`` setting.
+    """Return the single filesystem root that agent tools may touch.
+
+    ``/tmp`` and settings-provided extra host roots are deliberately excluded:
+    both would bypass the workspace mount shared with the isolated executor.
     """
-    roots: list[str] = []
-
-    # Project data directory — the agent's primary workspace.
-    from src.constants import DATA_DIR
-    roots.append(DATA_DIR)
-
-    # /tmp (and its macOS realpath /private/tmp).
-    roots.append("/tmp")
+    root = _agent_workspace_root()
     try:
-        private_tmp = os.path.realpath("/tmp")
-        if private_tmp != "/tmp":
-            roots.append(private_tmp)
+        os.makedirs(root, mode=0o700, exist_ok=True)
     except OSError:
+        # Resolver containment still fails closed when this root is unusable.
         pass
+    return [root]
 
-    # $TMPDIR — per-user temp root on macOS (e.g. /var/folders/.../T/).
-    tmpdir = os.environ.get("TMPDIR")
-    if tmpdir:
-        roots.append(tmpdir)
 
-    # Opt-in extra roots from settings.
+def _is_within_root(candidate: str, root: str) -> bool:
+    """Whether *candidate* is *root* or a child after canonicalization."""
     try:
-        from src.settings import get_setting
-        extra = get_setting("tool_path_extra_roots")
-        if isinstance(extra, list):
-            roots.extend(str(r) for r in extra if r)
-    except Exception:
-        pass
-
-    # Deduplicate; resolve symlinks so containment is unambiguous.
-    seen: set[str] = set()
-    out: list[str] = []
-    for r in roots:
-        try:
-            real = os.path.realpath(r)
-        except OSError:
-            continue
-        if real in seen:
-            continue
-        seen.add(real)
-        out.append(real)
-    return out
+        # ``realpath`` also expands Windows 8.3 aliases.  Without it, an
+        # application path such as ``C:\\Users\\NAME~1`` and its long form are
+        # treated as different roots, which both breaks the sidecar workdir
+        # mapping and invites inconsistent containment decisions.
+        candidate = os.path.realpath(os.path.expanduser(str(candidate)))
+        root = os.path.realpath(os.path.expanduser(str(root)))
+        candidate_cmp = os.path.normcase(candidate)
+        root_cmp = os.path.normcase(root)
+        return os.path.commonpath([candidate_cmp, root_cmp]) == root_cmp
+    except ValueError:
+        return False
 
 
 def _resolve_tool_path(raw_path: str) -> str:
@@ -163,8 +163,8 @@ def _resolve_tool_path(raw_path: str) -> str:
     Returns the realpath on success. Raises ValueError on rejection.
     Symlinks are resolved before comparison.
 
-    When a workspace is active for this turn, paths are confined to it instead
-    of the default allowlist (see _resolve_tool_path_in_workspace).
+    When a workspace is active for this turn, paths are further confined to
+    that child directory (see _resolve_tool_path_in_workspace).
     """
     ws = get_active_workspace()
     if ws:
@@ -183,11 +183,7 @@ def _resolve_tool_path(raw_path: str) -> str:
     for root in _tool_path_roots():
         if resolved == root:
             return resolved
-        try:
-            common = os.path.commonpath([resolved, root])
-        except ValueError:
-            continue
-        if common == root:
+        if _is_within_root(resolved, root):
             return resolved
     raise ValueError(
         f"path '{raw_path}' is outside the allowed roots"
@@ -201,7 +197,7 @@ def _resolve_tool_path_in_workspace(workspace: str, raw_path: str) -> str:
     root (relative paths resolve under it; paths that escape it are rejected),
     and the sensitive-file deny list (.ssh, .gnupg, id_rsa, …) still applies
     inside it. When no workspace is set, callers use _resolve_tool_path (the
-    default data/tmp allowlist) instead.
+    dedicated workspace-root allowlist) instead.
     """
     if raw_path is None or not str(raw_path).strip():
         raise ValueError("path is required")
@@ -214,17 +210,8 @@ def _resolve_tool_path_in_workspace(workspace: str, raw_path: str) -> str:
             f"path '{raw_path}' is inside a sensitive directory "
             f"(e.g. .ssh, .gnupg) or matches a sensitive filename"
         )
-    if resolved != base:
-        # normcase so containment holds on case-insensitive filesystems
-        # (Windows, default macOS): it lowercases on Windows and is a no-op on
-        # POSIX. commonpath raises ValueError across Windows drives (C: vs D:)
-        # or mixed abs/rel — both mean "outside", so the except rejects them.
-        nbase = os.path.normcase(base)
-        try:
-            if os.path.commonpath([os.path.normcase(resolved), nbase]) != nbase:
-                raise ValueError
-        except ValueError:
-            raise ValueError(f"path '{raw_path}' is outside the workspace ({workspace})")
+    if not _is_within_root(resolved, base):
+        raise ValueError(f"path '{raw_path}' is outside the workspace ({workspace})")
     return resolved
 
 
@@ -252,16 +239,21 @@ def vet_workspace(raw: str) -> Optional[str]:
     """Validate a requested workspace path at bind time.
 
     Returns the canonical path, or None when it is unusable: not a real
-    directory, or itself a sensitive path (.ssh, .gnupg, ...). The in-workspace
-    resolver deny-lists sensitive paths *inside* the workspace, but the
-    empty-path search root is the workspace itself, so the root has to be
-    vetted before it is ever bound.
+    directory, itself a sensitive path (.ssh, .gnupg, ...), or outside the
+    dedicated agent workspace root. The in-workspace resolver deny-lists
+    sensitive paths *inside* the workspace, but the empty-path search root is
+    the workspace itself, so the root has to be vetted before it is bound.
     """
     raw = (raw or "").strip()
     if not raw:
         return None
     resolved = os.path.realpath(os.path.expanduser(raw))
-    if not os.path.isdir(resolved) or _is_sensitive_path(resolved):
+    root = _tool_path_roots()[0]
+    if (
+        not os.path.isdir(resolved)
+        or _is_sensitive_path(resolved)
+        or not _is_within_root(resolved, root)
+    ):
         return None
     # Reject filesystem roots: binding / (or a Windows drive/UNC root) as the
     # workspace would make every absolute path "inside" it, collapsing the
@@ -274,8 +266,23 @@ def vet_workspace(raw: str) -> Optional[str]:
 
 def agent_cwd() -> str:
     """Working directory for agent subprocesses (bash/python/background jobs):
-    the active workspace when set, else the persistent data dir."""
-    return get_active_workspace() or _AGENT_WORKDIR
+    the active workspace when set, else the dedicated workspace root."""
+    return get_active_workspace() or _tool_path_roots()[0]
+
+
+def sandbox_workdir() -> str:
+    """Translate the active workspace into a safe sidecar-relative directory.
+
+    The executor protocol accepts only relative paths below its ``/workspace``
+    mount. This keeps application-container and host paths out of the executor
+    even if a caller controls a request body.
+    """
+    root = os.path.realpath(_tool_path_roots()[0])
+    cwd = os.path.realpath(agent_cwd())
+    if not _is_within_root(cwd, root):
+        raise RuntimeError("Active workspace is outside the dedicated workspace root.")
+    relative = os.path.relpath(cwd, root)
+    return "." if relative in ("", ".") else relative.replace(os.sep, "/")
 
 
 def get_mcp_manager():
@@ -318,6 +325,24 @@ _ADMIN_TOOLS = {
     "stop_served_model",
     "cancel_download",
 }
+
+# These operations start, stop, or inspect processes on the application host
+# or configured SSH targets.  They cannot be placed in the unprivileged tool
+# sidecar without granting it the very host/SSH access the sidecar is meant to
+# avoid.  Keep them unavailable to model-controlled dispatch unless a trusted
+# operator opted in at deployment time.
+_HIGH_TRUST_COOKBOOK_TOOLS = frozenset({
+    "download_model",
+    "serve_model",
+    "serve_preset",
+    "stop_served_model",
+    "cancel_download",
+    "adopt_served_model",
+    "list_served_models",
+    "tail_serve_output",
+    "list_downloads",
+    "list_cached_models",
+})
 
 
 def _owner_is_admin(owner: Optional[str]) -> bool:
@@ -504,8 +529,7 @@ _BG_MARKERS = {"#!bg", "#bg", "# bg", "#background", "# background", "@backgroun
 
 
 def _split_bg_marker(content: str):
-    """If the bash content's first non-empty line is a background marker
-    (e.g. `#!bg`), return (True, command_without_marker); else (False, content)."""
+    """Detect a legacy detached-command marker so it can be rejected safely."""
     lines = content.split("\n")
     i = 0
     while i < len(lines) and not lines[i].strip():
@@ -711,34 +735,30 @@ async def _execute_tool_block_impl(
         logger.warning("Public tool policy blocked owner=%r tool=%s", owner, tool)
         return desc, result
 
+    if tool in _HIGH_TRUST_COOKBOOK_TOOLS and not high_trust_cookbook_enabled():
+        desc = f"{tool}: BLOCKED"
+        result = {"error": HIGH_TRUST_COOKBOOK_HINT, "exit_code": 1}
+        logger.warning("High-trust Cookbook tool blocked tool=%s", tool)
+        return desc, result
 
-    # Background execution: a `bash` block whose first line is the `#!bg`
-    # marker runs DETACHED — returns a job id immediately so the chat stream
-    # isn't held open for a multi-minute install/ffmpeg/download. The always-on
-    # monitor re-invokes the agent with the full output when the job finishes.
-    if tool == "bash" and session_id:
+
+    # Detached execution is intentionally unsupported: it would make
+    # model-controlled processes escape the executor's request timeout and
+    # supervision boundary.
+    if tool == "bash":
         _is_bg, _bg_cmd = _split_bg_marker(content)
-        if _is_bg and _bg_cmd:
-            from src import bg_jobs
-            rec = bg_jobs.launch(_bg_cmd, session_id=session_id, cwd=agent_cwd())
-            short = _bg_cmd.strip().split(chr(10))[0][:80]
-            desc = f"bash (background): {short}"
-            result = {
-                "output": (
-                    f"Started background job `{rec['id']}`. It is running detached; "
-                    f"do NOT wait for it or poll it. You will be automatically re-invoked "
-                    f"with its full output when it finishes. Continue with other work, or "
-                    f"end your turn now and resume when the result arrives. If the user "
-                    f"later asks to check progress or stop it, call the manage_bg_jobs "
-                    f"tool yourself (output or kill); do not tell them to run a tool "
-                    f"command, and do not surface raw tool syntax in your reply."
+        if _is_bg:
+            # A detached process cannot be safely supervised by the isolated
+            # executor. Falling back to ``bg_jobs.launch`` would reintroduce
+            # host-process execution for model-controlled input.
+            desc = "bash (background): BLOCKED"
+            return desc, {
+                "error": (
+                    "Detached background commands are unavailable in the isolated "
+                    "executor. Run a bounded foreground command instead."
                 ),
-                "exit_code": 0,
-                "bg_job_id": rec["id"],
+                "exit_code": 125,
             }
-            logger.info(f"Tool executed: {desc} -> bg job {rec['id']}")
-            return desc, result
-
     # Route MCP-extracted tools through the MCP manager. Forward
     # the progress callback so long-running subprocess tools
     # (bash, python) can stream `tool_progress` events to the UI.
@@ -753,7 +773,7 @@ async def _execute_tool_block_impl(
         result = await _direct_fallback(tool, content, progress_cb=progress_cb) \
             or {"error": f"{tool}: execution failed", "exit_code": 1}
     elif tool == "manage_bg_jobs":
-        # Inspect/kill detached `bash` jobs; needs session_id to scope to chat.
+        # Inspect/kill legacy detached-job records; scope them to the chat.
         desc = f"manage_bg_jobs: {content.split(chr(10))[0][:80]}"
         result = await _direct_fallback(tool, content, session_id=session_id, owner=owner) \
             or {"error": "manage_bg_jobs: execution failed", "exit_code": 1}
