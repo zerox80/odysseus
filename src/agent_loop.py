@@ -12,7 +12,7 @@ import json
 import re
 import time
 import logging
-from typing import AsyncGenerator, List, Dict, Optional, Set
+from typing import AsyncGenerator, List, Dict, Optional, Set, Tuple
 from urllib.parse import urlparse
 
 from src.llm_core import (
@@ -1414,6 +1414,81 @@ def _minimal_odysseus_general_messages(messages: List[Dict], include_memory: boo
     return out
 
 
+def _minimal_artifact_messages(
+    messages: List[Dict],
+    artifact_skills: List[Tuple[str, str]],
+) -> List[Dict]:
+    """Build a small, task-anchored prompt for explicit file deliverables.
+
+    Small/local models can mistake Odysseus' full agent rules and skill index
+    for the user's request, even when the real user turn is technically last.
+    Artifact turns only need one tool, so keep the complete selected SKILL.md
+    procedure, a little recent context, and an unmistakable final task anchor.
+    """
+    latest = _extract_last_user_message(messages).strip()
+    skill_text = "\n\n".join(
+        f"## {name} (complete SKILL.md)\n{markdown.strip()}"
+        for name, markdown in artifact_skills
+    )
+    system = (
+        f"{ODYSSEUS_IDENTITY}\n"
+        "The next user message is the specific current task. Execute it now. "
+        "Never claim that no request was provided and never answer with a menu of capabilities.\n"
+        "Create the requested deliverable with the `create_document` function. "
+        "When native function calling is available, call that function directly. "
+        "Otherwise emit exactly one fenced block in this format:\n"
+        "```create_document\n<title>\n<language>\n<complete content>\n```\n"
+        "Do not merely describe the file or say that you could create it. "
+        "Use sensible sample data when the user explicitly permits arbitrary, random, example, or demo content.\n\n"
+        "Follow the selected built-in procedure below:\n\n"
+        f"{skill_text}"
+    )
+    out: List[Dict] = [{"role": "system", "content": system}]
+
+    # Preserve only compact conversational context and current-turn source
+    # material. Drop the large generated skill catalogue/integration/MCP
+    # envelopes that caused the model to lose the actual task.
+    latest_idx = next(
+        (idx for idx in range(len(messages) - 1, -1, -1) if messages[idx].get("role") == "user"),
+        len(messages),
+    )
+    allowed_sources = {"current chat uploaded files", "active editor document"}
+    recent: List[Dict] = []
+    chars = 0
+    for msg in reversed(messages[:latest_idx]):
+        role = msg.get("role")
+        if role not in {"user", "assistant"}:
+            continue
+        meta = msg.get("metadata") or {}
+        if meta.get("trusted") is False and meta.get("source") not in allowed_sources:
+            continue
+        content = msg.get("content", "")
+        if isinstance(content, list):
+            content = " ".join(
+                block.get("text", "") for block in content if isinstance(block, dict)
+            )
+        content = str(content or "").strip()
+        if not content:
+            continue
+        remaining = 6000 - chars
+        if remaining <= 0:
+            break
+        content = content[-min(len(content), remaining, 3000):]
+        recent.append({"role": role, "content": content})
+        chars += len(content)
+        if len(recent) >= 4:
+            break
+    out.extend(reversed(recent))
+    out.append({
+        "role": "user",
+        "content": (
+            "CURRENT USER REQUEST -- this is the task to execute now, not technical parameters:\n"
+            f"{latest}"
+        ),
+    })
+    return out
+
+
 _DOC_MODEL_ARTIFACT_RE = re.compile(
     r"(?:\|end\|)+\|?assistan(?:t)?\|?"
     r"|\|assistan(?:t)?\|"
@@ -2649,6 +2724,13 @@ async def stream_agent_loop(
     _t0 = time.time()
     _needs_admin = _detect_admin_intent(messages)
     _last_user = _extract_last_user_message(messages)
+    try:
+        from services.memory.artifact_skills import load_bundled_artifact_skills_for_request
+        _artifact_skills = load_bundled_artifact_skills_for_request(_last_user)
+    except Exception as _artifact_err:
+        logger.debug("[agent-intent] artifact skill detection skipped: %s", _artifact_err)
+        _artifact_skills = []
+    _artifact_turn = bool(_artifact_skills) and not plan_mode and not approved_plan and not guide_only
     _ody_qwen_finetune_model = (model or "").lower().startswith("odysseus-qwen3")
     _ody_memory_identity_turn = _looks_like_memory_identity_turn(_last_user)
     _intent = _classify_agent_request(messages, _last_user)
@@ -2942,19 +3024,11 @@ async def stream_agent_loop(
             _relevant_tools = set(ALWAYS_AVAILABLE)
         _relevant_tools.update(forced_set)
 
-    # Explicit artifact requests deterministically expose the document tools.
-    # The corresponding full SKILL.md was already loaded by
-    # _build_system_prompt; retrieval should never be able to hide its tool.
-    if not guide_only:
-        try:
-            from services.memory.artifact_skills import artifact_skill_names_for_request
-            if artifact_skill_names_for_request(_last_user):
-                if _relevant_tools is None:
-                    from src.tool_index import ALWAYS_AVAILABLE
-                    _relevant_tools = set(ALWAYS_AVAILABLE)
-                _relevant_tools.update({"create_document", "manage_documents"})
-        except Exception as _artifact_err:
-            logger.debug("[tool-rag] artifact tool include skipped: %s", _artifact_err)
+    # Explicit artifact requests deterministically expose their creation tool.
+    if _artifact_turn:
+        if _relevant_tools is None:
+            _relevant_tools = set()
+        _relevant_tools.add("create_document")
 
     # The skill index injected by _build_system_prompt tells the model to
     # call `manage_skills action=view`, and Jaccard-matched skills are pasted
@@ -3027,6 +3101,13 @@ async def stream_agent_loop(
     elif _ody_notes_finetune_mode and _relevant_tools is not None:
         _relevant_tools = {"manage_notes", "ask_user", "update_plan"}
         logger.info("[agent-intent] odysseus notes finetune tool clamp=%s", sorted(_relevant_tools))
+
+    # A file deliverable has one action target. Extra schemas and their prompt
+    # descriptions only distract small models (Gemma in particular), so clamp
+    # this path after every retrieval/skill expansion has finished.
+    if _artifact_turn:
+        _relevant_tools = {"create_document"}
+        logger.info("[agent-intent] artifact prompt/tool clamp=create_document skills=%s", [n for n, _ in _artifact_skills])
 
     if (
         _relevant_tools is not None
@@ -3142,7 +3223,15 @@ async def stream_agent_loop(
         suppress_skills=_low_signal_turn,
         active_email=active_email,
     )
-    if _ody_doc_finetune_mode and not plan_mode and not approved_plan and not guide_only:
+    if _artifact_turn:
+        messages = _minimal_artifact_messages(messages, _artifact_skills)
+        mcp_schemas = []
+        logger.info(
+            "[agent-intent] compact artifact prompt active skills=%s messages=%s",
+            [name for name, _ in _artifact_skills],
+            len(messages),
+        )
+    elif _ody_doc_finetune_mode and not plan_mode and not approved_plan and not guide_only:
         messages = _minimal_odysseus_doc_messages(
             messages,
             _prompt_active_document,
@@ -3288,6 +3377,8 @@ async def stream_agent_loop(
     actual_model = model
     total_tool_calls = 0  # for budget enforcement
     _ody_notes_tool_completed = False
+    _artifact_tool_completed = False
+    _artifact_nudge_count = 0
 
     # Loop-breaker state. Small models (e.g. deepseek-v4-flash) can get
     # stuck firing the same tool call over and over with no text — burns
@@ -3564,16 +3655,20 @@ async def stream_agent_loop(
                                 else data["delta"]
                             )
                             round_response += _delta_text
-                            full_response += _delta_text
+                            if not _artifact_turn:
+                                full_response += _delta_text
                             data["delta"] = _delta_text
-                        if not _ody_qwen_finetune_model or data.get("thinking"):
+                        if (
+                            not _artifact_turn
+                            and (not _ody_qwen_finetune_model or data.get("thinking"))
+                        ):
                             yield f"data: {json.dumps(data)}\n\n"
                         # Detect text-fence doc streaming. Normal agent prompts
                         # use ```create_document; the doc LoRA streaming path
                         # uses neutral ```document to avoid triggering learned
                         # hidden native tool-call output.
                         if (
-                            (round_num > 1 or _ody_doc_stream_create_mode)
+                            (round_num > 1 or _ody_doc_stream_create_mode or _artifact_turn)
                             and not _doc_acc
                             and not (tool_policy and tool_policy.blocks("create_document"))
                         ):
@@ -3660,8 +3755,36 @@ async def stream_agent_loop(
             native_tool_calls,
             round_num,
             is_api_model=(_is_api_model and not guide_only),
-            allow_fenced_for_api=_ody_doc_finetune_mode,
+            allow_fenced_for_api=(_ody_doc_finetune_mode or _artifact_turn),
         )
+        if _artifact_turn and tool_blocks:
+            create_idx = next(
+                (idx for idx, block in enumerate(tool_blocks) if block.tool_type == "create_document"),
+                None,
+            )
+            if create_idx is None:
+                logger.warning(
+                    "[agent] artifact turn discarded non-create tool call(s): %s",
+                    [block.tool_type for block in tool_blocks],
+                )
+                tool_blocks = []
+                converted_calls = []
+                if used_native:
+                    native_tool_calls = []
+            else:
+                if len(tool_blocks) > 1:
+                    logger.info(
+                        "[agent] artifact turn keeping first create_document and dropping extras: %s",
+                        [block.tool_type for block in tool_blocks],
+                    )
+                tool_blocks = [tool_blocks[create_idx]]
+                converted_calls = (
+                    [converted_calls[create_idx]]
+                    if create_idx < len(converted_calls)
+                    else converted_calls[:1]
+                )
+                if used_native:
+                    native_tool_calls = converted_calls
         if _ody_doc_stream_create_mode and tool_blocks:
             create_idx = next(
                 (idx for idx, block in enumerate(tool_blocks) if block.tool_type == "create_document"),
@@ -3822,12 +3945,48 @@ async def stream_agent_loop(
         # model with no real native_tool_calls) must not be stripped from the
         # persisted text either — otherwise it streams once and then disappears
         # on reload (#3222 follow-up).
-        cleaned_round = strip_tool_blocks(round_response, skip_fenced=(_is_api_model and not used_native and not guide_only)).strip()
-        round_texts.append(cleaned_round)
-        if _ody_qwen_finetune_model and not tool_blocks and cleaned_round:
+        cleaned_round = strip_tool_blocks(
+            round_response,
+            skip_fenced=(_is_api_model and not used_native and not guide_only and not _artifact_turn),
+        ).strip()
+        if not _artifact_turn or tool_blocks:
+            round_texts.append(cleaned_round)
+        if _ody_qwen_finetune_model and not _artifact_turn and not tool_blocks and cleaned_round:
             yield f'data: {json.dumps({"delta": cleaned_round})}\n\n'
 
         if not tool_blocks:
+            # A concrete file request must produce a real artifact. Weak local
+            # models sometimes answer the surrounding instructions instead of
+            # calling the only available tool; hide that failed prose and retry
+            # against the exact current task before reporting an honest failure.
+            if _artifact_turn:
+                if _artifact_nudge_count < 2 and round_num < max_rounds:
+                    _artifact_nudge_count += 1
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "The task is specific and still unfinished. Call `create_document` NOW for this exact request:\n"
+                            f"{_last_user}\n"
+                            "Return the function call or create_document fenced block, not prose."
+                        ),
+                    })
+                    logger.warning(
+                        "[agent] artifact-without-tool retry=%s model=%s response=%r",
+                        _artifact_nudge_count,
+                        model,
+                        cleaned_round[:200],
+                    )
+                    yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
+                    continue
+                failure = (
+                    "Die Datei konnte nicht erstellt werden, weil das ausgewählte Modell "
+                    "den erforderlichen Dokument-Toolaufruf auch nach mehreren Versuchen nicht ausgeführt hat."
+                )
+                round_texts.append(failure)
+                full_response += failure
+                yield f'data: {json.dumps({"delta": failure})}\n\n'
+                break
+
             # ── Completion verifier (mechanism 3a) ────────────────────
             # The model is finishing. If this was an effectful agentic turn,
             # have a fresh-context verifier independently check the work
@@ -4394,6 +4553,8 @@ async def stream_agent_loop(
             tool_events.append(tool_event)
             if block.tool_type in _VERIFIER_EFFECTFUL_TOOLS:
                 _effectful_used = True
+            if _artifact_turn and block.tool_type == "create_document" and not result.get("error"):
+                _artifact_tool_completed = True
 
             formatted = format_tool_result(desc, result)
             tool_results.append(formatted)
@@ -4429,11 +4590,34 @@ async def stream_agent_loop(
             logger.info("[agent] odysseus doc stream-create completed after one create_document")
             break
 
-        if _ody_doc_tool_completed:
+        if _ody_doc_tool_completed and not _artifact_tool_completed:
             if not full_response.strip() or full_response.strip().startswith("```"):
                 full_response = "Done."
                 yield 'data: ' + json.dumps({"delta": "Done."}) + '\n\n'
             logger.info("[agent] odysseus doc tool completed after one textual tool block")
+            break
+
+        if _artifact_tool_completed:
+            _artifact_names = {name for name, _ in _artifact_skills}
+            if "create-excel-workbook" in _artifact_names:
+                confirmation = (
+                    "Fertig -- die Excel-Liste ist im Editor geöffnet. "
+                    "Dort kannst du sie mit **Export as Excel (.xlsx)** speichern."
+                )
+            elif "create-pdf-document" in _artifact_names:
+                confirmation = (
+                    "Fertig -- das PDF-Dokument ist im Editor geöffnet. "
+                    "Dort kannst du es mit **Print as PDF** speichern."
+                )
+            else:
+                confirmation = (
+                    "Fertig -- das Word-Dokument ist im Editor geöffnet. "
+                    "Dort kannst du es mit **Export as Word** speichern."
+                )
+            full_response = confirmation
+            round_texts.append(confirmation)
+            yield f'data: {json.dumps({"delta": confirmation})}\n\n'
+            logger.info("[agent] artifact created successfully; ending after one tool call")
             break
 
         if _ody_notes_finetune_mode and _ody_notes_tool_completed:

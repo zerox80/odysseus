@@ -108,6 +108,12 @@ def test_artifact_skill_matcher_avoids_informational_mentions():
     assert artifact_skill_names_for_request("Was ist eigentlich eine PDF?") == []
 
 
+def test_exact_random_excel_request_selects_excel_skill():
+    assert artifact_skill_names_for_request(
+        "erstell excel liste wo du irgendwelche zufälligen sachen eingibst"
+    ) == ["create-excel-workbook"]
+
+
 def test_complete_bundled_skill_is_loaded_for_file_request():
     loaded = load_bundled_artifact_skills_for_request(
         "Erstelle einen hochwertigen PDF-Bericht"
@@ -165,12 +171,17 @@ def test_bundled_artifact_skills_are_read_only_in_the_ui():
     assert ".filter(s => s.source !== 'builtin')" in skills_js
 
 
-def test_agent_loop_auto_loads_skills_and_forces_document_tools():
+def test_agent_loop_uses_compact_task_anchored_artifact_path():
     loop = _read("src/agent_loop.py")
     initializer = _read("src/app_initializer.py")
     build_spec = _read("Odysseus.spec")
     assert "Automatically loaded Odysseus artifact skills" in loop
-    assert '"create_document", "manage_documents"' in loop
+    assert "def _minimal_artifact_messages(" in loop
+    assert "CURRENT USER REQUEST -- this is the task to execute now" in loop
+    assert '_relevant_tools = {"create_document"}' in loop
+    assert "artifact turn discarded non-create tool call(s)" in loop
+    assert "artifact-without-tool retry=" in loop
+    assert "allow_fenced_for_api=(_ody_doc_finetune_mode or _artifact_turn)" in loop
     assert "load_bundled_artifact_skills_for_request" in loop
     assert "ensure_bundled_artifact_skills" in initializer
     assert "services/memory/bundled_skills" in build_spec
