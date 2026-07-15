@@ -119,9 +119,11 @@ _AGENT_RULES = """\
 - If `web_search` is listed in this prompt, web search is available. Do NOT tell the user search/web tools are unavailable.
 - These exact tags execute automatically. For showing code examples, use ```shell, ```sh, ```py, etc. instead.
 - Multiple tool blocks per response OK. 60s timeout per tool, 10K char output limit.
-- Code/content >15 lines → ```create_document (NOT in chat). Short snippets OK in chat.
-- Long-form or structured writing is a document by default when the user asks to write/create/make/generate it and the answer would be more than a short paragraph. Use create_document instead of dumping the full content in chat.
+- Standalone code/content artifacts >15 lines → ```create_document. Explanations and analyses stay in chat; short code snippets are fine in chat.
+- Use a document for a standalone artifact the user asks you to create, such as a draft, report, article, script, program, or other exportable deliverable. Long explanations, analyses, advice, and answers remain in chat; length alone is not a reason to create a document or abbreviate the response.
 - Word/DOCX requests are editor documents by default: create/update the document with `create_document`/`update_document` in `markdown` and let the user export it with "Export as Word". Do NOT use shell, Python, `write_file`, `/app/data`, or `python-docx` unless the user explicitly asks for a real server-side `.docx` file at a disk path.
+- PDF deliverables are editor documents by default: use `markdown` and let the user choose "Print as PDF". Do not generate a server-side PDF unless the user explicitly requests a disk path or needs PDF-specific processing.
+- Excel/XLSX/spreadsheet deliverables are editor documents with `language="csv"`: create a valid CSV table and let the user choose "Export as Excel (.xlsx)" or "Export as CSV". Do not use shell/Python merely to manufacture an XLSX file unless a server-side path or advanced workbook features are explicitly required.
 - Editing an existing document: ALWAYS use ```edit_document with FIND/REPLACE blocks. Do NOT rewrite the whole document with ```update_document unless genuinely changing more than half of it.
 - BIAS TOWARD ACTION on edit requests. If the user says "edit out X", "remove the Y paragraph", "change Z" — JUST DO IT with your best interpretation. Don't ask for clarification on minor ambiguity. The user can undo or re-prompt if wrong.
 - AFTER A TOOL SUCCEEDS, do not second-guess. The success message ("Document edited: v2, 1 edit") means it worked. If no substantive user-facing result remains, confirm briefly; otherwise summarize the result clearly and completely.
@@ -168,9 +170,11 @@ _API_AGENT_RULES = """\
 - For web lookup/search/latest/current requests, and whenever facts may be stale, niche, source-specific, or uncertain, call `web_search` or `web_fetch`. Do NOT use shell, Python, curl, requests, or scraping code for web lookup unless web tools are unavailable or already failed.
 - If `web_search` is listed in this prompt, web search is available. Do NOT tell the user search/web tools are unavailable.
 - Default to substantial, useful answers with reasoning, caveats, and concrete next steps. Be brief only for simple acknowledgements or when the user asks for brevity.
-- For long code or content, use document tools instead of pasting large blocks into chat.
-- Long-form or structured writing is a document by default when the user asks to write/create/make/generate it and the answer would be more than a short paragraph. Call create_document instead of dumping the full content in chat.
+- For long standalone code or content artifacts requested as deliverables, use document tools. Long explanations and analyses stay in chat.
+- Use a document for a standalone artifact the user asks you to create, such as a draft, report, article, script, program, or other exportable deliverable. Long explanations, analyses, advice, and answers remain in chat; length alone is not a reason to create a document or abbreviate the response.
 - Word/DOCX requests are editor documents by default: create/update the document with `create_document`/`update_document` in `markdown` and let the user export it with "Export as Word". Do NOT call shell, Python, `write_file`, `/app/data`, or `python-docx` unless the user explicitly asks for a real server-side `.docx` file at a disk path.
+- PDF deliverables are editor documents by default: use `markdown` and let the user choose "Print as PDF". Only make a server-side PDF when the user explicitly requests a disk file or PDF-specific processing.
+- Excel/XLSX/spreadsheet deliverables are editor documents with `language="csv"`: create a valid CSV table and let the user choose "Export as Excel (.xlsx)" or "Export as CSV". Only use shell/Python for a workbook when the user explicitly needs a server-side file or advanced workbook features.
 - Editing an existing document: ALWAYS use `edit_document` with find/replace. Only use `update_document` for genuine full rewrites (>50% changed) — do NOT echo the entire file back for small edits.
 - If the active editor document is an email draft/compose window, treat that open email as the target for "write this", "write the email", "reply with...", "make it say...", "draft this", and similar requests. Do NOT create another document, search/list/manage documents, or open a different reply unless the user explicitly asks. Edit the open email draft with `edit_document` or `update_document`; preserve To/Cc/Bcc/Subject/In-Reply-To/References/X-* header lines unless the user asks to change them.
 - "Give suggestions / feedback / review / how can I improve this / what would make it better" about the OPEN document → call `suggest_document`, do NOT write a prose list of ideas in chat. It creates inline accept/reject bubbles on the doc. Give concrete `find`/`replace`/`reason` items. To suggest an ADDITION (e.g. "add a bow to the SVG", a new section), set `find` to a short existing anchor snippet and `replace` to that same snippet PLUS the new content. Only answer in prose when no document is open, or the request is purely conceptual with no concrete change to propose.
@@ -276,8 +280,10 @@ _DOMAIN_RULES = {
 - "Research X" means `trigger_research`, not a one-off `web_search`, unless the user explicitly asks for a quick lookup.""",
     "documents": """\
 ## Document rules
-- For long code/content (>15 lines), use `create_document` instead of pasting into chat.
+- Use `create_document` for a standalone artifact or exportable deliverable the user asks you to produce. Explanations and analyses stay in chat even when long.
 - Word/DOCX requests are editor documents by default: use `create_document`/`update_document` with language `markdown`; the UI can export the document with "Export as Word". Only create a real `.docx` on disk when the user explicitly gives a server-side path or asks for a disk file.
+- PDF requests are editor documents with language `markdown`; the UI can print/export them as PDF. Only create a disk PDF for an explicit server-side path or PDF-specific requirement.
+- Excel/XLSX/spreadsheet requests are editor documents with language `csv`; the UI can export them as a real `.xlsx` workbook or raw CSV. Generate valid CSV with a header row. Use shell/Python only for an explicit disk path or advanced workbook requirements such as formulas across sheets, charts, or formatting that CSV cannot represent.
 - If an active document is open, "fix this", "add X", "change Y", etc. usually refers to that document.
 - Use `edit_document` for targeted changes. Use `update_document` only for genuine full rewrites.
 - For feedback/review/suggestions on an open document, use `suggest_document`.""",
@@ -532,7 +538,7 @@ If the user asks for a reminder/alarm before the event, pass `reminder_minutes` 
     "send_to_session": "- ```send_to_session``` — Send a message to another session. Line 1 = session_id, rest = message. Use for orchestrating work across sessions.",
     "search_chats": "- ```search_chats``` — Search past session transcripts for direct conversation evidence. Use when user asks 'did we discuss X?', 'find the conversation about Y', or when prior chat context is more appropriate than persistent memory.",
     "pipeline": "- ```pipeline``` — Run a multi-step AI pipeline. Args (JSON) with ordered steps, each specifying a model and prompt. Use for complex workflows.",
-    "ui_control": "- ```ui_control``` — Control the UI: toggle tools on/off, OPEN PANELS, open email reply drafts, switch models, change themes. Commands: `toggle <name> on/off` (names: bash/shell, web/search, research, incognito, document_editor/documents), `open_panel <name>` (panels: documents, gallery, email, sessions, notes, memories/brain, skills, settings, cookbook), `open_email_reply <uid> <folder> <reply|reply-all|ai-reply> <body text>` (opens an email compose document pre-filled with body, DOES NOT send; use this for normal “write/draft a reply saying X” requests), `set_mode agent/chat`, `switch_model <name>`, `set_theme <preset>`, `create_theme <name> <bg> <fg> <panel> <border> <accent>` (optional key=val for advanced colors AND background effects: bgPattern=<none|dots|synapse|rain|constellations|perlin-flow|petals|sparkles|embers>, bgEffectColor=#RRGGBB, bgEffectIntensity=<num>, bgEffectSize=<num>, frosted=true|false). \"open documents\" / \"open library\" / \"show gallery\" / \"open inbox\" / \"open notes\" / \"open cookbook\" all map to `open_panel <name>`. Built-in theme presets: dark, light, midnight, paper, cyberpunk, retrowave, forest, ocean, ume, copper, terminal, organs, lavender, gpt, claude, cute. For any other vibe/name, use create_theme.",
+    "ui_control": "- ```ui_control``` — Control the UI: toggle optional capabilities on/off, OPEN PANELS, open email reply drafts, switch models, change themes. Commands: `toggle <name> on/off` (names: bash/shell, web/search, research, incognito, document_editor/documents), `open_panel <name>` (panels: documents, gallery, email, sessions, notes, memories/brain, skills, settings, cookbook), `open_email_reply <uid> <folder> <reply|reply-all|ai-reply> <body text>` (opens an email compose document pre-filled with body, DOES NOT send; use this for normal “write/draft a reply saying X” requests), `switch_model <name>`, `set_theme <preset>`, `create_theme <name> <bg> <fg> <panel> <border> <accent>` (optional key=val for advanced colors AND background effects: bgPattern=<none|dots|synapse|rain|constellations|perlin-flow|petals|sparkles|embers>, bgEffectColor=#RRGGBB, bgEffectIntensity=<num>, bgEffectSize=<num>, frosted=true|false). \"open documents\" / \"open library\" / \"show gallery\" / \"open inbox\" / \"open notes\" / \"open cookbook\" all map to `open_panel <name>`. Built-in theme presets: dark, light, midnight, paper, cyberpunk, retrowave, forest, ocean, ume, copper, terminal, organs, lavender, gpt, claude, cute. For any other vibe/name, use create_theme.",
     "ask_user": "- ```ask_user``` — Ask the user a multiple-choice question when the task is genuinely ambiguous and the answer changes what you do next (pick an approach, confirm an assumption, choose a target). Args (JSON): {\"question\": \"...\", \"options\": [{\"label\": \"...\", \"description\": \"...\"?}, ...], \"multi\": false?}. 2-6 options. The user gets clickable buttons; calling this ENDS your turn and their choice comes back as your next message. Prefer sensible defaults — only ask when you truly can't proceed well without their input.",
     "update_plan": "- ```update_plan``` — While executing an approved plan, write the plan back: tick steps done or revise them. Args (JSON): {\"plan\": \"- [x] done step\\n- [ ] next step\"}. Always pass the COMPLETE checklist, not a diff. Call it after finishing each step (mark it `- [x]`) and whenever the user asks to change the plan. The user's docked plan window updates live. Does nothing if there's no active plan.",
     "list_served_models": "- ```list_served_models``` — Show what the Cookbook (LLM-serving subsystem) is currently running. NO args. Use this for ANY 'what's running' / 'what's serving' / 'show my cookbook' / 'is anything up' query. DO NOT shell out (`ps aux`, `docker ps`, etc.) — this tool is the source of truth. Failed serve tasks include recent logs plus diagnosis/retry suggestions; use those suggestions to call `serve_model` again with an adjusted command when appropriate.",
@@ -1035,7 +1041,7 @@ def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, o
     )
     if has(r"\b(documents?|docs?|draft|compose|poem|story|essay|outline|letter|edit|rewrite|proofread|suggest|feedback|review this|make a file)\b"):
         domains.add("documents")
-    if has(r"\b(?:word|docx|\.docx|doc\s*x|office document)\b"):
+    if has(r"\b(?:word|docx|\.docx|doc\s*x|office document|pdf|\.pdf|spreadsheet|workbook|excel|xlsx|\.xlsx|csv|\.csv)\b"):
         domains.add("documents")
     if "notes_calendar_tasks" not in domains and has(r"\bwrite\b"):
         domains.add("documents")
@@ -1586,6 +1592,32 @@ def _build_system_prompt(
             _cached_base_prompt = agent_prompt
             _cached_base_prompt_key = cache_key
 
+    # Built-in artifact procedures are part of Odysseus' trusted product
+    # behavior, not user-authored memory. For an explicit DOCX/Excel/PDF file
+    # request, load the complete matching SKILL.md into the system prompt on
+    # this turn. This makes skill use deterministic instead of hoping the
+    # model notices an index entry and calls manage_skills first.
+    try:
+        from services.memory.artifact_skills import load_bundled_artifact_skills_for_request
+        _artifact_request = _extract_last_user_message(messages)
+        _artifact_skills = load_bundled_artifact_skills_for_request(_artifact_request)
+        if _artifact_skills:
+            _artifact_lines = [
+                "## Automatically loaded Odysseus artifact skills",
+                "The user explicitly requested one or more file deliverables. "
+                "Odysseus selected the following built-in SKILL.md files. Follow "
+                "their complete procedures for this request and use the document "
+                "tools they require. Do not ask the user to choose a mode or skill.",
+            ]
+            for _skill_name, _skill_markdown in _artifact_skills:
+                _artifact_lines.extend([
+                    f"\n### {_skill_name} (full SKILL.md)",
+                    _skill_markdown.strip(),
+                ])
+            agent_prompt += "\n\n" + "\n".join(_artifact_lines)
+    except Exception as _artifact_err:
+        logger.debug("Built-in artifact skill loading skipped: %s", _artifact_err)
+
     # Dynamic parts that change per request
     mcp_schemas = []
     if mcp_mgr:
@@ -1917,6 +1949,7 @@ def _build_system_prompt(
                 from services.memory.skills import SkillsManager
                 from src.constants import DATA_DIR
                 sm = SkillsManager(DATA_DIR)
+                sm.ensure_bundled_artifact_skills()
                 # Brain → Skills settings → "Auto-approve skills" toggle +
                 # confidence threshold. Approve OFF → published-only (no draft
                 # passes). Approve ON → drafts at/above the chosen confidence
@@ -2153,6 +2186,7 @@ def _build_base_prompt(
             from services.memory.skills import SkillsManager
             from src.constants import DATA_DIR
             _sm = SkillsManager(DATA_DIR)
+            _sm.ensure_bundled_artifact_skills()
             active_tools = list(set(TOOL_SECTIONS.keys()) - set(disabled or []))
             skill_idx = _sm.index_for(owner=owner, active_toolsets=active_tools)
             if skill_idx:
@@ -2908,6 +2942,20 @@ async def stream_agent_loop(
             _relevant_tools = set(ALWAYS_AVAILABLE)
         _relevant_tools.update(forced_set)
 
+    # Explicit artifact requests deterministically expose the document tools.
+    # The corresponding full SKILL.md was already loaded by
+    # _build_system_prompt; retrieval should never be able to hide its tool.
+    if not guide_only:
+        try:
+            from services.memory.artifact_skills import artifact_skill_names_for_request
+            if artifact_skill_names_for_request(_last_user):
+                if _relevant_tools is None:
+                    from src.tool_index import ALWAYS_AVAILABLE
+                    _relevant_tools = set(ALWAYS_AVAILABLE)
+                _relevant_tools.update({"create_document", "manage_documents"})
+        except Exception as _artifact_err:
+            logger.debug("[tool-rag] artifact tool include skipped: %s", _artifact_err)
+
     # The skill index injected by _build_system_prompt tells the model to
     # call `manage_skills action=view`, and Jaccard-matched skills are pasted
     # into the prompt as procedures to follow — but neither path goes through
@@ -2926,6 +2974,7 @@ async def stream_agent_loop(
             except Exception:
                 pass
             _sm = SkillsManager(DATA_DIR)
+            _sm.ensure_bundled_artifact_skills()
             _owner_skills = _sm.load(owner=owner) if _skills_on else []
             if _owner_skills:
                 _relevant_tools.add("manage_skills")

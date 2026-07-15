@@ -141,13 +141,9 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     }
   }
 
-  /** Switch chat to agent mode if not already */
+  /** Compatibility hook: every chat already uses unified smart routing. */
   function _ensureAgentMode() {
-    const ab = document.getElementById('mode-agent-btn');
-    const cb = document.getElementById('mode-chat-btn');
-    if (ab && !ab.classList.contains('active')) {
-      ab.click();
-    }
+    return true;
   }
 
   export function init(apiBase) {
@@ -9325,6 +9321,20 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     return _html2pdfReady;
   }
 
+  let _xlsxExportReady = null;
+  function ensureXlsxForExport() {
+    if (_xlsxExportReady) return _xlsxExportReady;
+    if (window.XLSX) return (_xlsxExportReady = Promise.resolve());
+    _xlsxExportReady = new Promise((resolve, reject) => {
+      const s = document.createElement('script');
+      s.src = '/static/lib/xlsx.full.min.js';
+      s.onload = resolve;
+      s.onerror = () => reject(new Error('Failed to load Excel library'));
+      document.head.appendChild(s);
+    });
+    return _xlsxExportReady;
+  }
+
   function _getExportBaseName() {
     const doc = docs.get(activeDocId);
     const title = (doc && doc.title) || 'document';
@@ -9357,6 +9367,32 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     a.download = safeName + ver + ext;
     a.click();
     URL.revokeObjectURL(a.href);
+  }
+
+  async function exportAsXlsx() {
+    if (!activeDocId) return;
+    const textarea = document.getElementById('doc-editor-textarea');
+    if (!textarea) return;
+    try {
+      await ensureXlsxForExport();
+      const csv = textarea.value || '';
+      const workbook = window.XLSX.read(csv, { type: 'string', raw: true });
+      const originalName = workbook.SheetNames[0];
+      const title = docs.get(activeDocId)?.title || 'Sheet1';
+      const sheetName = title
+        .replace(/[\\\/\?\*\[\]\:]/g, '_')
+        .trim()
+        .slice(0, 31) || 'Sheet1';
+      if (originalName && originalName !== sheetName) {
+        workbook.Sheets[sheetName] = workbook.Sheets[originalName];
+        delete workbook.Sheets[originalName];
+        workbook.SheetNames[0] = sheetName;
+      }
+      window.XLSX.writeFile(workbook, _getExportBaseName() + '.xlsx');
+      if (uiModule) uiModule.showToast('Exported as Excel workbook');
+    } catch (err) {
+      if (uiModule) uiModule.showError('Excel export failed: ' + (err.message || err));
+    }
   }
 
   // "Import from device" — open a file picker, upload, and immediately open
@@ -9495,8 +9531,11 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     options.push({ label: 'Import from library', fn: () => openLibrary() });
     options.push({ label: 'Import from device', fn: () => _importFromDevice(), _divider: true });
     if (isForm) options.push({ label: 'Filled PDF (.pdf)', fn: _downloadFilledPdf });
+    options.push({ label: `Export as ${langLabel}`, fn: exportDocument });
+    if (lang === 'csv') {
+      options.push({ label: 'Export as Excel (.xlsx)', fn: exportAsXlsx });
+    }
     options.push(
-      { label: 'Export Markdown', fn: exportDocument },
       { label: 'Print as PDF', fn: exportAsPdf },
       { label: 'Export as Word', fn: exportAsDocx },
     );

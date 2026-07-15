@@ -175,7 +175,7 @@ function initEnabledToggle() {
   if (tokensSlider && tokensValue) {
     tokensSlider.addEventListener('input', () => {
       const v = parseInt(tokensSlider.value);
-      tokensValue.textContent = v > 8192 ? 'No limit' : v.toLocaleString();
+      tokensValue.textContent = v > 65536 ? 'No limit' : v.toLocaleString();
     });
   }
 }
@@ -214,7 +214,7 @@ function initNameDropdown() {
       const nameRow = document.getElementById('char-name-row');
       if (nameRow) nameRow.style.display = '';
       if (tempInput) { tempInput.value = 1.0; if (tempValue) tempValue.textContent = '1.0'; tempInput.dispatchEvent(new Event('input')); }
-      if (tokensInput) { tokensInput.value = 8448; if (tokensValue) tokensValue.textContent = 'No limit'; tokensInput.dispatchEvent(new Event('input')); }
+      if (tokensInput) { tokensInput.value = 65792; if (tokensValue) tokensValue.textContent = 'No limit'; tokensInput.dispatchEvent(new Event('input')); }
       if (delBtn) delBtn.style.display = 'none';
       return;
     }
@@ -302,8 +302,8 @@ function _tryLoadTemplate(name) {
   }
   if (tokensInput) {
     const v = tmpl.max_tokens || 0;
-    tokensInput.value = v === 0 ? 8448 : v;
-    if (tokensValue) tokensValue.textContent = (v === 0 || v > 8192) ? 'No limit' : v.toLocaleString();
+    tokensInput.value = v === 0 ? 65792 : v;
+    if (tokensValue) tokensValue.textContent = (v === 0 || v > 65536) ? 'No limit' : v.toLocaleString();
     tokensInput.dispatchEvent(new Event('input'));
   }
   const delBtn = document.getElementById('char-delete-template-btn');
@@ -467,7 +467,7 @@ function initSaveAsTemplate() {
       name: name,
       system_prompt: promptInput ? promptInput.value : '',
       temperature: tempInput ? parseFloat(tempInput.value) : 1.0,
-      max_tokens: _rawTk > 8192 ? 0 : _rawTk,
+      max_tokens: _rawTk > 65536 ? 0 : _rawTk,
     };
 
     try {
@@ -593,9 +593,9 @@ export function openCustomPresetModal() {
   }
   if (tokensInput) {
     const saved = savedConfig.max_tokens || 0;
-    tokensInput.value = saved === 0 ? 8448 : saved;
+    tokensInput.value = saved === 0 ? 65792 : saved;
     const tkv = document.getElementById('tokens-value');
-    if (tkv) tkv.textContent = (saved === 0 || saved > 8192) ? 'No limit' : parseInt(saved).toLocaleString();
+    if (tkv) tkv.textContent = (saved === 0 || saved > 65536) ? 'No limit' : parseInt(saved).toLocaleString();
   }
   if (promptInput) promptInput.value = savedConfig.system_prompt || '';
 
@@ -610,7 +610,7 @@ export function openCustomPresetModal() {
     name: nameInput ? nameInput.value : '',
     prompt: promptInput ? promptInput.value : '',
     temp: tempInput ? tempInput.value : '1',
-    tokens: tokensInput ? tokensInput.value : '8448',
+    tokens: tokensInput ? tokensInput.value : '65792',
   };
   function _updateStartBtn() {
     const btn = document.getElementById('save-custom-preset');
@@ -688,7 +688,7 @@ export function openCustomPresetModal() {
     _snapshot.name = nameInput ? nameInput.value : '';
     _snapshot.prompt = promptInput ? promptInput.value : '';
     _snapshot.temp = tempInput ? tempInput.value : '1';
-    _snapshot.tokens = tokensInput ? tokensInput.value : '8448';
+    _snapshot.tokens = tokensInput ? tokensInput.value : '65792';
     _updateStartBtn();
   }, 50));
   _updateStartBtn();
@@ -772,7 +772,7 @@ export async function saveCustomPreset(showToast, showError) {
   const name = _isInjectStart ? '' : (nameInput ? nameInput.value.trim() : '');
   const temperature = parseFloat(tempInput.value);
   const rawTokens = parseInt(tokensInput.value);
-  const max_tokens = rawTokens > 8192 ? 0 : rawTokens;
+  const max_tokens = rawTokens > 65536 ? 0 : rawTokens;
   const system_prompt = _isInjectStart ? '' : promptInput.value;
 
   const enabled = true; // always enabled when saving — deactivation happens via X/Reset

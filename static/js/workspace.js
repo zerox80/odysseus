@@ -26,11 +26,8 @@ function _basename(p) {
   return parts[parts.length - 1] || p;
 }
 
-// Workspace only applies to agent mode (it scopes the file/shell tools), so the
-// pill + overflow entry are hidden in chat mode, like the bash toggle.
 function _isChatMode() {
-  const b = document.getElementById('mode-chat-btn');
-  return !!(b && b.classList.contains('active'));
+  return false;
 }
 
 export function syncWorkspaceIndicator(path) {
@@ -52,7 +49,7 @@ export function syncWorkspaceIndicator(path) {
   try { document.dispatchEvent(new CustomEvent('overflow-state-change')); } catch (_) {}
 }
 
-// Called by the agent/chat mode toggle so the pill + overflow entry follow mode.
+// Kept as a compatibility hook for callers that refresh toolbar state.
 export function applyMode(_mode) {
   syncWorkspaceIndicator(getWorkspace());
 }

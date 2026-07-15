@@ -2777,7 +2777,6 @@ body.bg-pattern-sparkles {
       transition: transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
       z-index: 0;
     }
-    .mode-toggle.mode-chat::before,
     .mode-toggle.mode-right::before {
       transform: translateX(100%);
     }
@@ -2789,12 +2788,6 @@ body.bg-pattern-sparkles {
     }
     .mode-toggle.mode-toggle-three.mode-third::before {
       transform: translateX(200%);
-    }
-    #mode-agent-btn {
-      border-radius: 10px 0 0 10px;
-    }
-    #mode-chat-btn {
-      border-radius: 0 10px 10px 0;
     }
     .mode-toggle-btn {
       background: none;
@@ -4608,8 +4601,6 @@ body.bg-pattern-sparkles {
         font-size: 12px;
         min-height: 34px;
       }
-      #mode-agent-btn { border-radius: 12px 0 0 12px; }
-      #mode-chat-btn { border-radius: 0 12px 12px 0; }
       /* Diff mode — stack toolbar, bigger buttons */
       .diff-toolbar {
         padding: 8px 12px;

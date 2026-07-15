@@ -631,6 +631,7 @@ function renderSkillsList() {
   container.closest('.admin-card')?.classList.remove('skills-has-expanded');
 
   const sorted = _getFilteredSkills();
+  const mutableSkills = sorted.filter(sk => sk.source !== 'builtin');
   // Built-in capabilities show as their own read-only section (skipped when
   // the user is filtering to drafts, since built-ins aren't drafts).
   // Skills menu shows the user's own skills only (built-in capabilities
@@ -646,7 +647,8 @@ function renderSkillsList() {
   }
 
   const selectBtn = document.getElementById('skills-select-btn');
-  if (selectBtn) selectBtn.disabled = false;
+  if (selectBtn) selectBtn.disabled = mutableSkills.length === 0;
+  if (_selectMode && mutableSkills.length === 0) _exitSelectMode(false);
 
   // Library-style cards: a compact bar that expands in-place to show the
   // SKILL.md, with a footer (Delete left; Edit / Run / Approve right).
@@ -664,6 +666,7 @@ function renderSkillsList() {
 
   for (const sk of sorted) {
     const name = sk.name || sk.id;
+    const isBundledArtifact = sk.source === 'builtin';
     const dm = dupeMeta.get(name);
     if (dm) {
       sk._duplicateGroup = dm.group;
@@ -685,9 +688,10 @@ function renderSkillsList() {
     card.className = 'doclib-card skill-card';
     card.dataset.skillName = name;
     card.dataset.skillStatus = sk.status || 'draft';
+    card.dataset.bundledArtifact = isBundledArtifact ? 'true' : 'false';
 
     const checked = _selectedNames.has(name) ? 'checked' : '';
-    const cbHtml = _selectMode
+    const cbHtml = _selectMode && !isBundledArtifact
       ? `<input type="checkbox" class="memory-select-cb skill-select-cb" data-name="${esc(name)}" ${checked} style="margin-right:6px;flex-shrink:0;cursor:pointer;" />`
       : '';
 
@@ -709,14 +713,14 @@ function renderSkillsList() {
         ${_duplicatePriorityPill(sk)}
         <span class="skill-stats">${_auditMarks(sk)}<span class="skill-conf" style="color:${confColor};">${conf}%</span> · ${uses}u</span>
         <span class="skill-chevron-up" title="Collapse"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="18 15 12 9 6 15"/></svg></span>
-        <button class="skill-kebab-btn" title="Actions" aria-label="Actions"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="12" cy="19" r="1.6"/></svg></button>
+        ${isBundledArtifact ? '' : '<button class="skill-kebab-btn" title="Actions" aria-label="Actions"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="12" cy="19" r="1.6"/></svg></button>'}
       </div>
     `;
     card.appendChild(header);
 
     // Kebab dropdown (collapsed-bar quick actions: same set + icons as the
     // expanded footer). Clicking the kebab opens it; it doesn't expand.
-    header.querySelector('.skill-kebab-btn').addEventListener('click', (e) => {
+    header.querySelector('.skill-kebab-btn')?.addEventListener('click', (e) => {
       e.stopPropagation();
       _openSkillMenu(e.currentTarget, card, sk, name, isPublished);
     });
@@ -785,17 +789,23 @@ function renderSkillsList() {
       });
     });
 
-    const rightGroup = document.createElement('div');
-    rightGroup.className = 'doclib-action-group';
-    const btnRow = document.createElement('div');
-    btnRow.className = 'doclib-action-btn-row';
-    btnRow.appendChild(testBtn);
-    btnRow.appendChild(editBtn);
-    btnRow.appendChild(delBtn);
-    rightGroup.appendChild(btnRow);
-
-    actions.appendChild(pubBtn);
-    actions.appendChild(rightGroup);
+    if (isBundledArtifact) {
+      const managedLabel = document.createElement('span');
+      managedLabel.className = 'skill-managed-label';
+      managedLabel.textContent = 'Odysseus built-in · automatically selected · read-only';
+      actions.appendChild(managedLabel);
+    } else {
+      const rightGroup = document.createElement('div');
+      rightGroup.className = 'doclib-action-group';
+      const btnRow = document.createElement('div');
+      btnRow.className = 'doclib-action-btn-row';
+      btnRow.appendChild(testBtn);
+      btnRow.appendChild(editBtn);
+      btnRow.appendChild(delBtn);
+      rightGroup.appendChild(btnRow);
+      actions.appendChild(pubBtn);
+      actions.appendChild(rightGroup);
+    }
     preview.appendChild(actions);
     card.appendChild(preview);
 
@@ -871,9 +881,19 @@ function renderSkillsList() {
 
   // "Your skills" section — show the header only when there's also a
   // built-in section to distinguish from (otherwise it's just the list).
-  if (cards.length) {
-    if (showBuiltin) container.appendChild(_mkSectionHeader('user', 'Your skills', cards.length));
-    cards.forEach(c => { c.dataset.skillSection = 'user'; container.appendChild(c); });
+  const userCards = cards.filter(c => c.dataset.bundledArtifact !== 'true');
+  const artifactCards = cards.filter(c => c.dataset.bundledArtifact === 'true');
+
+  if (userCards.length) {
+    if (artifactCards.length || showBuiltin) {
+      container.appendChild(_mkSectionHeader('user', 'Your skills', userCards.length));
+    }
+    userCards.forEach(c => { c.dataset.skillSection = 'user'; container.appendChild(c); });
+  }
+
+  if (artifactCards.length) {
+    container.appendChild(_mkSectionHeader('artifacts', 'Artifact skills · automatic', artifactCards.length));
+    artifactCards.forEach(c => { c.dataset.skillSection = 'artifacts'; container.appendChild(c); });
   }
 
   // Built-in capabilities — read-only cards (the agent's native tools).
@@ -903,7 +923,9 @@ function renderSkillsList() {
         if (cb.checked) _selectedNames.add(name); else _selectedNames.delete(name);
         const all = document.getElementById('skills-select-all');
         if (all) {
-          const visible = _getFilteredSkills().map(s => s.name || s.id);
+          const visible = _getFilteredSkills()
+            .filter(s => s.source !== 'builtin')
+            .map(s => s.name || s.id);
           all.checked = visible.length > 0 && visible.every(n => _selectedNames.has(n));
         }
         _updateBulkBar();
@@ -1626,7 +1648,7 @@ function _enterSelectMode() {
   renderSkillsList();
 }
 
-function _exitSelectMode() {
+function _exitSelectMode(rerender = true) {
   _selectMode = false;
   _selectedNames.clear();
   const bar = document.getElementById('skills-bulk-bar');
@@ -1635,7 +1657,7 @@ function _exitSelectMode() {
   if (bar) bar.classList.add('hidden');
   if (btn) { btn.classList.remove('active'); btn.innerHTML = _SKILLS_SELECT_BTN_DOT_SVG + 'Select'; }
   if (all) all.checked = false;
-  renderSkillsList();
+  if (rerender) renderSkillsList();
 }
 
 function _updateBulkBar() {
@@ -1665,7 +1687,9 @@ function _updateBulkBar() {
 function _toggleSelectAll() {
   const all = document.getElementById('skills-select-all');
   if (!all) return;
-  const visible = _getFilteredSkills().map(s => s.name || s.id);
+  const visible = _getFilteredSkills()
+    .filter(s => s.source !== 'builtin')
+    .map(s => s.name || s.id);
   if (all.checked) visible.forEach(n => _selectedNames.add(n));
   else visible.forEach(n => _selectedNames.delete(n));
   _updateBulkBar();

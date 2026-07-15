@@ -569,7 +569,10 @@ def setup_chat_routes(
         # Plan mode is not part of the merge-ready UI. Ignore stale clients or
         # manual form posts that still send plan_mode=true.
         plan_mode = False
-        chat_mode = str(form_data.get("mode", "")).lower()  # 'chat' or 'agent'
+        # Unified smart mode: callers describe the outcome; Odysseus decides
+        # whether tools are relevant. Keep the internal value for the existing
+        # execution branches and for privilege-based text-only fallback.
+        chat_mode = "agent"
         # Workspace: confine the agent's file/shell tools to this folder.
         workspace, workspace_rejected = _resolve_request_workspace(
             request, form_data.get("workspace")
@@ -585,38 +588,16 @@ def setup_chat_routes(
         approved_plan = ""
         if not plan_mode:
             approved_plan = (form_data.get("approved_plan") or "").strip()[:8192]
-        # Did the USER explicitly pick agent mode? (vs. us auto-escalating
-        # below). Skill extraction should only learn from real agent sessions,
-        # not chats we quietly promoted for a notes/calendar intent.
-        user_requested_agent = (chat_mode == "agent")
+        user_requested_agent = True
         _search_enabled = (
             str(allow_web_search).lower() == "true"
             or str(use_web).lower() == "true"
         )
-        # Intent auto-escalation: if the user is clearly asking the assistant
-        # to create a todo, reminder, or calendar event, promote chat → agent
-        # for this turn so the LLM has access to manage_notes / manage_calendar.
-        # This is a LIGHT promotion — see the disabled_tools block below, which
-        # withholds shell/code/file tools so the model doesn't try to `bash`
-        # its way through a plain chat request (and fail, especially with the
-        # shell disabled).
         auto_escalated = False
         _tool_intent = _classify_tool_intent(message) if isinstance(message, str) else None
         _explicit_web_intent = bool(
             _tool_intent and _tool_intent.needs_tools and _tool_intent.category == "web"
         )
-        if chat_mode == "chat" and _tool_intent and _tool_intent.needs_tools:
-            chat_mode = "agent"
-            auto_escalated = True
-            logger.info(
-                "chat→agent auto-escalation: category=%s reason=%s",
-                _tool_intent.category,
-                _tool_intent.reason,
-            )
-        elif chat_mode == "chat" and _search_enabled:
-            chat_mode = "agent"
-            auto_escalated = True
-            logger.info("chat→agent auto-escalation: search enabled")
         active_doc_id = form_data.get("active_doc_id", "").strip()
         logger.info(f"[doc-inject] chat_mode={chat_mode}, active_doc_id={active_doc_id!r}")
 

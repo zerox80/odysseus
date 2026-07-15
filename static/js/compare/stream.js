@@ -220,25 +220,19 @@ async function streamToPane(paneIdx, sessionId, message, aiMsgEl, opts) {
     fd.append('message', message);
     fd.append('session', sessionId);
 
-    // Compare mode determines what tools/features are enabled
+    // The comparison type determines which specialist features are enabled.
     const isAgent = state._compareMode === 'agent';
     const isResearch = state._compareMode === 'research';
+    fd.append('mode', 'agent');
 
-    // Agent mode: enable all tools (web, bash, etc.)
+    // Smart mode: make tools available; the model chooses whether to use them.
     if (isAgent) {
-      fd.append('mode', 'agent');
       fd.append('allow_web_search', 'true');
       fd.append('allow_bash', 'true');
     } else if (isResearch) {
       fd.append('use_research', 'true');
     } else {
-      // Chat/Image: pure chat only — no tools, no search, no bash, no RAG.
-      // Explicitly send mode='chat' so the backend's compare_mode strip
-      // (chat_routes.py line 385) actually triggers — otherwise the form
-      // field was missing and chat_mode defaulted to "", which meant
-      // bash/python/web_search were never added to disabled_tools and
-      // models would still attempt to run Python.
-      fd.append('mode', 'chat');
+      // Specialist types can opt out of retrieved conversation context.
       fd.append('use_rag', 'false');
     }
     const incognitoChk = document.getElementById('incognito-toggle');

@@ -737,7 +737,7 @@ export function applyModelColor(roleEl, modelName) {
         const _pid = window.presetsModule.getSelectedPreset();
         const _preset = _pid ? window.presetsModule.getPreset(_pid) : null;
         const _mt = _preset?.max_tokens;
-        if (_mt && _mt > 0 && _mt <= 8192) {
+        if (_mt && _mt > 0 && _mt <= 65536) {
           html += '<div><span class="ctx-label">Max tokens</span> ' + _mt.toLocaleString() + ' <span style="opacity:0.4">(configured)</span></div>';
         }
       }

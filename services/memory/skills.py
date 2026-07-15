@@ -22,12 +22,37 @@ from __future__ import annotations
 import json
 import logging
 import os
+import tempfile
 import time
 from typing import Dict, Iterable, List, Optional
 
 from .skill_format import Skill, slugify
 
 logger = logging.getLogger(__name__)
+
+
+def _atomic_write_text(path: str, content: str) -> None:
+    """Atomically write UTF-8 text without importing the full app core.
+
+    Importing ``core.atomic_io`` initializes ``core.__init__`` and therefore
+    the LLM/network stack. Skill provisioning is a storage concern and must
+    also work during lightweight startup, packaging checks, and unit tests.
+    """
+    directory = os.path.dirname(path) or "."
+    os.makedirs(directory, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(prefix=".skill-", suffix=".tmp", dir=directory)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
+            f.write(content)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -175,10 +200,75 @@ class SkillsManager:
     def _write_skill(self, sk: Skill) -> str:
         path = self._skill_file(sk.category or "general", sk.name)
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        from core.atomic_io import atomic_write_text
-        atomic_write_text(path, sk.to_markdown())
+        _atomic_write_text(path, sk.to_markdown())
         sk.path = path
         return path
+
+    @staticmethod
+    def _is_builtin(sk: Skill) -> bool:
+        """Return True only for global, source-controlled Odysseus skills."""
+        return not sk.owner and sk.source == "builtin"
+
+    @classmethod
+    def _is_visible_to_owner(cls, sk: Skill, owner: Optional[str]) -> bool:
+        """Owner-scoped visibility with a narrow exception for built-ins."""
+        if cls._is_builtin(sk):
+            return True
+        return (sk.owner or "") == (owner or "")
+
+    def ensure_bundled_artifact_skills(self) -> List[str]:
+        """Provision Odysseus' built-in DOCX, Excel, and PDF skills.
+
+        Source-controlled templates remain the authority. Existing user skills
+        are never overwritten, while prior built-in copies are refreshed when
+        a shipped template changes.
+        """
+        from .artifact_skills import iter_bundled_artifact_skills
+
+        existing: Dict[str, tuple[str, Skill]] = {}
+        for path in self._iter_skill_files():
+            sk = self._read_skill(path)
+            if sk:
+                prior = existing.get(sk.name)
+                if prior is None or (self._is_builtin(sk) and not self._is_builtin(prior[1])):
+                    existing[sk.name] = (path, sk)
+
+        provisioned: List[str] = []
+        for expected_name, template_path in iter_bundled_artifact_skills():
+            try:
+                markdown = template_path.read_text(encoding="utf-8")
+                bundled = Skill.from_markdown(markdown)
+            except Exception as exc:
+                logger.warning("Failed to read bundled skill %s: %s", expected_name, exc)
+                continue
+            if bundled.name != expected_name or not self._is_builtin(bundled):
+                logger.warning("Rejected malformed bundled skill template: %s", template_path)
+                continue
+
+            prior = existing.get(expected_name)
+            if prior:
+                path, current = prior
+                if not self._is_builtin(current):
+                    logger.warning(
+                        "Bundled skill %s is shadowed by a user skill; leaving it untouched",
+                        expected_name,
+                    )
+                    continue
+            else:
+                path = self._skill_file(bundled.category, bundled.name)
+
+            try:
+                current_text = ""
+                if os.path.isfile(path):
+                    with open(path, encoding="utf-8") as f:
+                        current_text = f.read()
+                if current_text != markdown:
+                    os.makedirs(os.path.dirname(path), exist_ok=True)
+                    _atomic_write_text(path, markdown)
+                provisioned.append(expected_name)
+            except Exception as exc:
+                logger.warning("Failed to provision bundled skill %s: %s", expected_name, exc)
+        return provisioned
 
     def backfill_owner(self, primary_owner: str, valid_owners: Optional[set[str]] = None) -> int:
         """Assign legacy/unclaimed skill files to the primary owner.
@@ -196,6 +286,8 @@ class SkillsManager:
         for path in self._iter_skill_files():
             sk = self._read_skill(path)
             if not sk:
+                continue
+            if self._is_builtin(sk):
                 continue
             owner = (sk.owner or "").strip()
             if owner == primary_owner:
@@ -279,12 +371,14 @@ class SkillsManager:
         entries = self.load_all()
         if owner is None:
             return entries
-        # SECURITY: strict ownership filter. The previous predicate also
-        # included skills with NO owner field (`not s.get("owner")`), which
-        # leaked legacy / un-stamped skills to every authenticated user.
-        # Hide them now; the owner needs to be backfilled on disk if those
-        # skills should be visible to a specific user.
-        return [s for s in entries if s.get("owner") == owner]
+        # SECURITY: strict ownership remains the default. The sole ownerless
+        # exception is source="builtin", which is shipped by Odysseus and is
+        # intentionally visible to every user.
+        return [
+            s for s in entries
+            if s.get("owner") == owner
+            or (not s.get("owner") and s.get("source") == "builtin")
+        ]
 
     # ----------------------------------------------------------------------
     # CRUD — disk-backed
@@ -391,8 +485,6 @@ class SkillsManager:
     ) -> Dict:
         """Install a fetched skill bundle (relative path → text) under skills/."""
         from .skill_importer import SkillImportError, pick_skill_md, _safe_relpath
-        from core.atomic_io import atomic_write_text
-
         if not files:
             raise SkillImportError("empty bundle")
         _rel, skill_md = pick_skill_md(files)
@@ -415,7 +507,7 @@ class SkillsManager:
             safe = _safe_relpath(rel)
             dest = os.path.join(skill_dir, safe)
             os.makedirs(os.path.dirname(dest), exist_ok=True)
-            atomic_write_text(dest, content)
+            _atomic_write_text(dest, content)
 
         sk.name = nm
         sk.category = cat
@@ -425,7 +517,7 @@ class SkillsManager:
             extra = (sk.body_extra or "").strip()
             note = f"Imported from {source_url}"
             sk.body_extra = f"{extra}\n\n{note}".strip() if extra else note
-        atomic_write_text(self._skill_file(cat, nm), sk.to_markdown())
+        _atomic_write_text(self._skill_file(cat, nm), sk.to_markdown())
         sk.path = self._skill_file(cat, nm)
         return sk.to_dict()
 
@@ -450,6 +542,9 @@ class SkillsManager:
                 continue
             if (sk.owner or "") != (owner or ""):
                 continue
+            if self._is_builtin(sk):
+                logger.warning("Refusing to modify built-in skill %s", skill_id)
+                return False
 
             old_dir = os.path.dirname(path)
 
@@ -509,6 +604,9 @@ class SkillsManager:
                 continue
             if (sk.owner or "") != (owner or ""):
                 continue
+            if self._is_builtin(sk):
+                logger.warning("Refusing to delete built-in skill %s", skill_id)
+                return False
             skill_dir = os.path.dirname(path)
             try:
                 # Remove the whole skill dir
@@ -546,7 +644,7 @@ class SkillsManager:
             sk = self._read_skill(path)
             if not sk or sk.name != name:
                 continue
-            if (sk.owner or "") != (owner or ""):
+            if not self._is_visible_to_owner(sk, owner):
                 continue
             try:
                 with open(path, encoding="utf-8") as f:
@@ -562,7 +660,7 @@ class SkillsManager:
             sk = self._read_skill(path)
             if not sk or sk.name != name:
                 continue
-            if (sk.owner or "") != (owner or ""):
+            if not self._is_visible_to_owner(sk, owner):
                 continue
             base = os.path.realpath(os.path.dirname(path))
             target = os.path.realpath(os.path.join(base, ref_path))

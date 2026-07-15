@@ -86,7 +86,7 @@ class PresetUpdateRequest(BaseModel):
     max_tokens: int = Field(
         0,
         ge=0,
-        le=8192,
+        le=65536,
         description="Maximum number of tokens to generate (0 = no limit)"
     )
     system_prompt: str = Field(

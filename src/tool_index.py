@@ -1,5 +1,5 @@
 """
-RAG-based tool selection for agent mode.
+RAG-based tool selection for unified Smart routing.
 
 Instead of injecting all tool descriptions into the system prompt,
 embed them in a ChromaDB collection and retrieve only the top-K
@@ -78,7 +78,7 @@ BUILTIN_TOOL_DESCRIPTIONS: Dict[str, str] = {
     "get_workspace": "Return the absolute path of the active workspace folder the user is working in. File tools are confined to it; shell and Python commands run in an isolated executor with only this workspace mount. Call this first when the user refers to 'the project'/'the code'/'this folder' without giving a path, instead of asking them.",
     "write_file": "Write/create or fully rewrite a file ON DISK (source code, configs, project files). Use for new files or full rewrites — NOT create_document (editor panel) and NOT a bash heredoc.",
     "edit_file": "Edit an existing file ON DISK by exact string replacement (fix a bug, change a function). Shows a diff. The tool for changing files on disk — NOT edit_document (editor panel) and NOT bash sed/heredoc.",
-    "create_document": "Create a new document in the editor panel. For code, articles, text content longer than 15 lines, unless an already-open document/email draft is the obvious target. If an email compose draft is open, edit that draft instead of creating another document.",
+    "create_document": "Create a standalone artifact in the editor panel when the user wants a document, report, article, code file, PDF-ready document, spreadsheet, Excel/XLSX workbook, CSV, or other exportable deliverable. Use language=markdown for Word/PDF-ready documents and language=csv for spreadsheets; the editor offers the matching export. Keep ordinary explanations in chat. If an email compose draft is open, edit that draft instead of creating another document.",
     "edit_document": "Preferred tool for editing an existing document — targeted find-and-replace. Use for any small change: add a function, fix a bug, tweak a section, rename things.",
     "update_document": "Replace the entire active document content. ONLY for full rewrites (>50% changed). Do not use for small edits — use edit_document instead.",
     "suggest_document": "Suggest changes to the active document with explanations. For code review, proofreading, feedback requests.",
@@ -105,7 +105,7 @@ BUILTIN_TOOL_DESCRIPTIONS: Dict[str, str] = {
     "search_chats": "Search past session transcripts across chats.",
     "ask_user": "Ask the user a multiple-choice question to get a decision or clarification. Use this when the task is genuinely ambiguous and the answer changes what you do next — pick between approaches, confirm an assumption, choose among options — instead of guessing. Provide a clear `question` and 2-6 `options` (each with a short `label`, optional `description`). Omit `multi`/keep it false unless the question explicitly permits choosing multiple options. Calling this ENDS your turn: the user sees clickable buttons and their choice arrives as your next message. Don't use it for things you can decide from context or sensible defaults, or for irreversible-action confirmation if a dedicated flow exists.",
     "update_plan": "Write back to the ACTIVE PLAN while executing an approved plan: mark steps done or revise them. After finishing a step call this with the full checklist and that step marked done; when the user asks to change the plan call it with the revised checklist. Always pass the COMPLETE markdown checklist (`- [ ]` / `- [x]`), not a diff. The user's docked plan window updates live. No effect when there is no active plan.",
-    "ui_control": "Control the UI and toggle tools on/off. Use this to turn off / turn on / disable / enable individual tools and features: shell (bash), search (web), research, browser, documents, incognito. Open panels (documents library, gallery, email inbox, sessions, notes, memories/brain, skills, settings, cookbook) via `open_panel <name>`. Use `open_email_reply <uid> <folder> reply <body text>` (or structured body) to open an email reply draft document without sending. USE THIS whenever the user says to write/draft a reply or tells you what to say — opening an empty draft or sending immediately is wrong. Body can continue on subsequent lines for multi-line replies. Also switches between chat/agent modes, changes the current model, and applies/creates themes.",
+    "ui_control": "Control optional capabilities and the UI. Turn shell, web search, research, browser, documents, or incognito on/off; open panels; open a pre-filled email reply draft without sending; switch models; and apply or create themes. There is no separate Chat/Agent mode: tool choice is automatic.",
     "list_email_accounts": "List configured email accounts and default status. Use before reading or sending mail when the user mentions Gmail, work mail, custom domain mail, another mailbox, or asks to compare/check multiple inboxes.",
     "list_emails": "List emails for a folder/account, newest first, including read messages by default. Shows subject, sender, date, UID, account, and AI summary. Check inbox, find emails needing replies. Supports account from list_email_accounts for Gmail/work/custom mailboxes. For last/latest/newest email, use max_results=1 and unread_only=false.",
     "read_email": "Read the full content of a specific email by UID or Message-ID. View email body, check details. Supports account from list_email_accounts when the UID belongs to a non-default mailbox.",
@@ -495,7 +495,7 @@ class ToolIndex:
         frozenset({"turn off", "turn on", "disable", "enable",
                    "shell off", "shell on", "search off", "search on",
                    "research off", "research on", "incognito",
-                   "switch model", "change model", "set mode", "agent mode", "chat mode",
+                   "switch model", "change model",
                    "open library", "open documents", "open gallery", "open email",
                    "open inbox", "open settings", "open memories", "open memory",
                    "open skills", "open notes", "open chats", "open sessions",

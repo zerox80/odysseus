@@ -46,6 +46,13 @@ def initialize_managers(base_dir: str, rag_manager=None) -> Dict[str, Any]:
     # Initialize core managers
     memory_manager = MemoryManager(DATA_DIR)
     skills_manager = SkillsManager(DATA_DIR)
+    try:
+        bundled = skills_manager.ensure_bundled_artifact_skills()
+        logger.info("Provisioned %d bundled artifact skills", len(bundled))
+    except Exception as exc:
+        # Chat can still start and answer normally if an installation is
+        # missing its bundled data directory; prompt loading also fails soft.
+        logger.warning("Bundled artifact skill provisioning failed: %s", exc)
     session_manager = SessionManager(SESSIONS_FILE)
     set_session_manager(session_manager)  # Enable Session.add_message() persistence
     upload_handler = UploadHandler(base_dir, UPLOAD_DIR)

@@ -23,7 +23,7 @@ function _guessVoteMode(v) {
   if (v.mode) return v.mode;
   // Legacy vote — check if models look like search providers
   if (v.models && v.models.some(m => _searchProviderNames.has(m.toLowerCase()))) return 'search';
-  return 'chat';
+  return 'agent';
 }
 
 export function showScoreboard() {
@@ -71,12 +71,12 @@ export function showScoreboard() {
   }
 
   // Mode tabs
-  const modes = ['chat', 'agent', 'search', 'research'];
-  const modeLabels = { chat: 'Chat', agent: 'Agent', search: 'Search', research: 'Research' };
+  const modes = ['agent', 'search', 'research'];
+  const modeLabels = { agent: 'Smart', search: 'Search', research: 'Research' };
   const tabBar = document.createElement('div');
   tabBar.className = 'compare-mode-tabs';
   tabBar.style.marginBottom = '12px';
-  let activeMode = 'chat';
+  let activeMode = 'agent';
 
   function renderScoreTable() {
     // Clear previous table
@@ -94,7 +94,10 @@ export function showScoreboard() {
     const wrap = document.createElement('div');
     wrap.className = 'scoreboard-wrap';
 
-    const filtered = votes.filter(v => _guessVoteMode(v) === activeMode);
+    const filtered = votes.filter(v => {
+      const voteMode = _guessVoteMode(v);
+      return activeMode === 'agent' ? (voteMode === 'agent' || voteMode === 'chat') : voteMode === activeMode;
+    });
 
     // Aggregate
     const stats = {};

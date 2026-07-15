@@ -151,7 +151,7 @@ async function rerollPane(paneIdx, overrideTimeout) {
     return;
   }
 
-  // Chat/agent mode: stream via session
+  // Smart model comparison: stream via session.
   const aiMsg = document.createElement('div');
   aiMsg.className = 'msg msg-ai';
   aiMsg.innerHTML = '<div class="role">AI</div><div class="body"></div>';

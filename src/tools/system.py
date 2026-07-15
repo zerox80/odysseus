@@ -51,6 +51,7 @@ async def do_manage_skills(content: str, owner: Optional[str] = None) -> Dict:
     from services.memory.skill_format import Skill, slugify
     from src.constants import DATA_DIR
     sm = SkillsManager(DATA_DIR)
+    sm.ensure_bundled_artifact_skills()
 
     # Accept legacy `skill_id` as an alias for `name`.
     name = (args.get("name") or args.get("skill_id") or "").strip()

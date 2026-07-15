@@ -1337,7 +1337,7 @@ async function _cmdToggleSidebar(args, ctx) {
 async function _cmdOpen(args, ctx) {
   const target = (args[0] || '').trim().toLowerCase();
   if (!target) {
-    slashReply('Open what? Try /open Cookbook, /open Settings, /open Gallery, /open Notes, /open Tasks, /open Library, /open Research, or /open Compare.');
+    slashReply('Open what? Try /open Settings, /open Library, /open Research, /open Compare, or /open Brain.');
     return true;
   }
   const clickFirst = (...ids) => {
@@ -1348,20 +1348,12 @@ async function _cmdOpen(args, ctx) {
     return false;
   };
   try {
-    if (target === 'cookbook' || target === 'cook') {
-      if (cookbookModule && typeof cookbookModule.open === 'function') await cookbookModule.open({ tab: 'Download' });
-      else clickFirst('tool-cookbook-btn', 'rail-cookbook');
-      return true;
-    }
     if (target === 'settings' || target === 'setting' || target === 'config') {
       if (settingsModule && typeof settingsModule.open === 'function') settingsModule.open();
       else clickFirst('user-bar-settings', 'rail-settings');
       return true;
     }
     const targets = {
-      gallery: ['tool-gallery-btn', 'rail-gallery'],
-      notes: ['tool-notes-btn', 'rail-notes'],
-      tasks: ['tool-tasks-btn', 'rail-tasks'],
       library: ['tool-library-btn', 'rail-archive'],
       documents: ['tool-library-btn', 'rail-archive'],
       docs: ['tool-library-btn', 'rail-archive'],
@@ -2469,42 +2461,13 @@ async function _cmdDemo(args, ctx) {
   // Beat between the welcome line and the first hint so it doesn't snap in.
   await delay(900);
 
-  // Reset to a known starting state so the interactive steps (switch to Agent,
-  // turn Web on) actually have something to do.
-  try {
-    const _agentBtn = document.getElementById('mode-agent-btn');
-    const _chatBtn  = document.getElementById('mode-chat-btn');
-    if (_agentBtn && _chatBtn) {
-      _agentBtn.classList.remove('active');
-      _chatBtn.classList.add('active');
-      const _t = _agentBtn.closest('.mode-toggle');
-      if (_t) _t.classList.add('mode-chat');
-    }
-    // Web is persisted per-mode under web_chat / web_agent. Zero both so the
-    // toggle is genuinely off when the user reaches the "turn it on" step.
-    const _st = Storage.getJSON(Storage.KEYS.TOGGLES, {});
-    _st.mode = 'chat';
-    _st.web_chat = false;
-    _st.web_agent = false;
-    Storage.setJSON(Storage.KEYS.TOGGLES, _st);
-    // If the web button is currently on, click it to fully unwind it via the
-    // existing handler (covers any state the click handler tracks that we
-    // can't see from here).
-    const _wbtn = document.getElementById('web-toggle-btn');
-    if (_wbtn && _wbtn.classList.contains('active')) _wbtn.click();
-    _wbtn?.classList.remove('active');
-    const _webCb = document.getElementById('web-toggle');
-    if (_webCb) _webCb.checked = false;
-  } catch {}
-
   const sidebar = document.getElementById('sidebar');
 
   const steps = [
     { sel: '#sidebar-new-chat-btn', text: 'Start a new chat here. <b>Click it.</b> You can do it!', mode: 'click',
       before() { if (sidebar?.classList.contains('hidden')) sidebar.classList.remove('hidden'); } },
     { sel: '#model-picker-btn',   text: 'Pick your LLM, Local or API.', advanceOnClick: true },
-    { sel: '#mode-agent-btn',     text: '<b>Agent mode</b> gives Odysseus more control of the app when your model supports tools: create a theme, download a model, make a daily task, organize things, and more.', mode: 'click' },
-    { sel: '#web-toggle-btn',     text: 'Toggle tools like <b>web search</b>. Odysseus comes with private built-in <b>SearXNG</b> search.', mode: 'click' },
+    { sel: '#web-toggle-btn',     text: 'Odysseus chooses tools automatically. These controls are optional permission overrides, for example to disable <b>web search</b>. You normally leave them enabled.' },
     { sel: '#overflow-plus-btn',  text: 'More tools can be found here, or in your sidebar. <b>Click to peek.</b>',
       advanceOnClick: true, pulseNext: true, afterDelay: 2200 },
     { sel: '#message',            text: 'Write your prompt here. Drag and drop files to attach them. <b>/prompt</b> for random prompt, <b>/help</b> for more.',
@@ -2721,7 +2684,7 @@ async function _cmdTourCompare(args, ctx) {
   // bounding-rect was putting the tooltip in the top-left corner.
   const phase1 = [
     { sel: '#compare-model-overlay .modal-body',
-      text: 'Pick what type of test you want to run. <b>Chat</b>, <b>Agent</b>, <b>Search</b> or <b>Deep Research</b>.',
+      text: 'Pick what type of test you want to run: <b>Smart</b>, <b>Search</b> or <b>Deep Research</b>.',
       placement: 'center-above',
       before: () => {
         const modalBody = document.querySelector('#compare-model-overlay .modal-body');
@@ -5894,7 +5857,8 @@ const COMMANDS = {
     category: 'Tours',
     help: 'Cookbook tour: hardware, downloads, serving',
     handler: _cmdTourCookbook,
-    usage: '/tour-cookbook'
+    usage: '/tour-cookbook',
+    hidden: true
   },
   'tour-research': {
     alias: ['research-tour'],
@@ -5929,7 +5893,8 @@ const COMMANDS = {
     category: 'Tours',
     help: 'Gallery tour: photos, albums, editor',
     handler: _cmdTourGallery,
-    usage: '/tour-gallery'
+    usage: '/tour-gallery',
+    hidden: true
   },
   'tour-brain': {
     alias: ['brain-tour', 'tour-memory', 'memory-tour'],
@@ -5943,14 +5908,16 @@ const COMMANDS = {
     category: 'Tours',
     help: 'Tasks tour: built-ins, runs, pause controls',
     handler: _cmdTourTask1,
-    usage: '/tour-task-1'
+    usage: '/tour-task-1',
+    hidden: true
   },
   'tour-task-2': {
     alias: ['tour-tasks-2', 'tasks-tour-2'],
     category: 'Tours',
     help: 'Tasks tour: adding and managing tasks',
     handler: _cmdTourTask2,
-    usage: '/tour-task-2'
+    usage: '/tour-task-2',
+    hidden: true
   },
   prompt: {
     alias: [],
@@ -5979,14 +5946,15 @@ const COMMANDS = {
     hidden: true,
     help: 'Open a tool panel',
     handler: _cmdOpen,
-    usage: '/open Cookbook'
+    usage: '/open Settings'
   },
   cookbook: {
     alias: ['cook'],
     category: 'Tools',
     help: 'Open Cookbook; use "serve" to jump to model serving',
     handler: (args, ctx) => _cmdToolPanel('cookbook', args, ctx),
-    usage: '/cookbook  ·  /cookbook serve qwen'
+    usage: '/cookbook  ·  /cookbook serve qwen',
+    hidden: true
   },
   email: {
     alias: ['mail', 'inbox'],
@@ -6000,14 +5968,16 @@ const COMMANDS = {
     category: 'Tools',
     help: 'Open Notes',
     handler: (args, ctx) => _cmdToolPanel('notes', args, ctx),
-    usage: '/notes'
+    usage: '/notes',
+    hidden: true
   },
   tasks: {
     alias: [],
     category: 'Tools',
     help: 'Open Tasks',
     handler: (args, ctx) => _cmdToolPanel('tasks', args, ctx),
-    usage: '/tasks'
+    usage: '/tasks',
+    hidden: true
   },
   brain: {
     alias: ['memories'],
@@ -6028,7 +5998,8 @@ const COMMANDS = {
     category: 'Tools',
     help: 'Open Gallery',
     handler: (args, ctx) => _cmdToolPanel('gallery', args, ctx),
-    usage: '/gallery'
+    usage: '/gallery',
+    hidden: true
   },
   research: {
     alias: [],

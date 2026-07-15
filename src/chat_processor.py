@@ -415,6 +415,7 @@ class ChatProcessor:
         # call the tool anyway, so the index would be noise.
         if agent_mode and not incognito and use_skills and self.skills_manager:
             try:
+                self.skills_manager.ensure_bundled_artifact_skills()
                 idx = self.skills_manager.index_for(owner=owner)
             except Exception as e:
                 logger.debug(f"Skills index unavailable: {e}")

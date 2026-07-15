@@ -1,8 +1,8 @@
-"""Lightweight routing hints for chat requests that need tools.
+"""Lightweight routing hints for requests that benefit from tools.
 
-These patterns are intentionally conservative. They only promote plain chat
-to agent mode when the user asks the assistant to take an action, not when the
-user asks how a feature works.
+The product exposes one smart conversation mode. These patterns provide
+deterministic hints for tool selection without asking the user to choose a
+technical execution mode.
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ from typing import Iterable, Pattern
 
 @dataclass(frozen=True)
 class ToolIntent:
-    """A cheap, deterministic chat-to-agent routing decision."""
+    """A cheap, deterministic tool-routing hint."""
 
     needs_tools: bool
     category: str = ""
@@ -86,10 +86,14 @@ _ROUTING_PATTERNS: tuple[tuple[str, str, Pattern[str]], ...] = tuple(
         ("email", "check inbox request", r"\bcheck\s+(?:my\s+)?(?:email|inbox|mail)\b"),
         ("email", "unread email request", r"\bunread\s+(?:email|mail)s?\b"),
 
-        # Document creation/editing. Word/DOCX requests should use the
-        # editor-document tools first; the browser can export those as Word.
+        # Exportable document creation/editing. The editor can export prose as
+        # Word/PDF and CSV tables as real Excel workbooks.
         ("documents", "word/docx document request", rf"{_PLEASE}(?:create|make|write|generate|draft|build)\b.{{0,120}}\b(?:word|docx|\.docx|office\s+document)\b"),
         ("documents", "word/docx document request", rf"\b(?:word|docx|\.docx|office\s+document)\b.{{0,120}}\b(?:document|file|export)\b"),
+        ("documents", "excel/spreadsheet request", rf"{_PLEASE}(?:create|make|generate|build|prepare|export)\b.{{0,120}}\b(?:excel|xlsx|\.xlsx|spreadsheet|workbook|csv|\.csv)\b"),
+        ("documents", "excel/spreadsheet request", rf"\b(?:excel|xlsx|\.xlsx|spreadsheet|workbook|csv|\.csv)\b.{{0,120}}\b(?:file|table|sheet|export|create|make|generate)\b"),
+        ("documents", "pdf document request", rf"{_PLEASE}(?:create|make|write|generate|draft|build|export)\b.{{0,120}}\b(?:pdf|\.pdf)\b"),
+        ("documents", "pdf document request", rf"\b(?:pdf|\.pdf)\b.{{0,120}}\b(?:document|file|report|export|create|make|generate)\b"),
 
         # UI/control-plane actions that should open panels or flip toggles.
         ("ui", "open/show panel request", rf"{_PLEASE}(?:open|show|bring\s+up)\s+(?:me\s+)?(?:my\s+|the\s+)?{_PANEL}\b"),
@@ -136,11 +140,18 @@ _TOOL_INTENT_PATTERNS: tuple[Pattern[str], ...] = tuple(
 
 
 def classify_tool_intent(text: str) -> ToolIntent:
-    """Classify whether a chat message should be promoted to agent mode."""
+    """Classify whether a request likely benefits from a tool."""
     if not text:
         return ToolIntent(False, reason="empty message")
     if _EXPLANATORY_PREFIX.search(text):
         return ToolIntent(False, reason="explanatory feature question")
+    # File-format requests are shared with the Odysseus artifact-skill
+    # loader, including German phrasing such as "Mach eine Excel-Datei".
+    # Keeping this deterministic ensures the request reaches document tools
+    # before model-based tool retrieval gets a chance to miss it.
+    from services.memory.artifact_skills import artifact_skill_names_for_request
+    if artifact_skill_names_for_request(text):
+        return ToolIntent(True, category="documents", reason="artifact file creation request")
     for category, reason, pattern in _ROUTING_PATTERNS:
         if pattern.search(text):
             return ToolIntent(True, category=category, reason=reason)
@@ -148,7 +159,7 @@ def classify_tool_intent(text: str) -> ToolIntent:
 
 
 def message_needs_tools(text: str, patterns: Iterable[Pattern[str]] = _TOOL_INTENT_PATTERNS) -> bool:
-    """Return True when a plain chat message should be promoted to agent mode."""
+    """Return True when a request likely benefits from a tool."""
     if not text:
         return False
     if _EXPLANATORY_PREFIX.search(text):
