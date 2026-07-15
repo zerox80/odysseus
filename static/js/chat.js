@@ -999,6 +999,11 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
     let holder = null;
     let finalMeta = null;
     let spinner = null;
+    // Declared outside the try block because the error/abort cleanup in catch
+    // must also be able to inspect it. Keeping this as a block-scoped `const`
+    // next to reader setup masked every earlier send failure with a secondary
+    // `ReferenceError: streamingTTS is not defined`, leaving no AI bubble.
+    let streamingTTS = false;
     let timedOut = false;
     let processingProbeTimer = null;
     let processingProbeAbort = null;
@@ -1358,20 +1363,6 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       
       const modelName = sessionModule.getCurrentModel() || null;
 
-      let loadingText = 'Initializing...';
-
-      if (el('web-toggle').checked && !_isAgent) {
-        const _searchLabel = searchModule ? searchModule.getProviderLabel() : 'web';
-        loadingText = `Searching via ${_searchLabel}...<br>
-                       <span style="font-size: 0.9em; opacity: 0.8;">
-                       Query: "${msg.substring(0, 50)}${msg.length > 50 ? '...' : ''}"<br>
-                       Fetching top results...</span>`;
-      } else if (el('research-toggle').checked) {
-        loadingText = 'Deep research mode active...';
-      } else {
-        loadingText = 'Processing request...';
-      }
-
       var roleLabel = _modelRouteLabel(modelName, modelName);
       var _charNameInit = presetsModule.getCharacterName ? presetsModule.getCharacterName() : '';
       if (_charNameInit) roleLabel = _charNameInit;
@@ -1390,10 +1381,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       spinner.start();
       
       // Update spinner message based on mode
-      if (el('web-toggle').checked && !_isAgent) {
-        spinner.updateMessage('Searching web with ' + (searchModule ? searchModule.getProviderLabel() : 'SearXNG'));
-        setTimeout(() => spinner.updateMessage('Processing results'), 1500);
-      } else if (el('research-toggle').checked) {
+      if (el('research-toggle').checked) {
         spinner.updateMessage('Researching');
         setTimeout(() => spinner.updateMessage('Analyzing sources'), 1500);
       } else {
@@ -1478,7 +1466,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       let isThinking = false;
       let thinkingStartTime = null;
       // Streaming TTS: synthesize sentence-by-sentence during streaming
-      const streamingTTS = !!(window.aiTTSManager && window.aiTTSManager.autoPlay && window.aiTTSManager.available);
+      streamingTTS = !!(window.aiTTSManager && window.aiTTSManager.autoPlay && window.aiTTSManager.available);
       if (streamingTTS) window.aiTTSManager.streamingStart();
       // Multi-bubble agent tracking
       let roundHolder = holder;       // Current AI text bubble (changes per round)
@@ -3288,9 +3276,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
           const abortReason = currentAbort._reason || '';
           // Timeout-triggered aborts should remain visible instead of disappearing.
           if (timedOut || abortReason === 'timeout') {
-            const timeoutMsg = _isAgent
-              ? 'Agent response timed out. Try again, switch to a faster model, or reduce tool usage.'
-              : 'Response timed out. Try again.';
+            const timeoutMsg = 'Response timed out. Try again, switch to a faster model, or reduce tool usage.';
 
             if (holder && !accumulated) {
               holder.querySelector('.body').innerHTML =

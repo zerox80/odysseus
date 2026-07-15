@@ -19,9 +19,13 @@ def _read(relative_path: str) -> str:
 
 def test_primary_ui_does_not_offer_chat_or_agent_modes():
     html = _read("static/index.html")
+    app_js = _read("static/app.js")
     sessions_js = _read("static/js/sessions.js")
     assert 'id="mode-agent-btn"' not in html
     assert 'id="mode-chat-btn"' not in html
+    assert 'data-ui-key="mode-toggle"' not in html
+    assert "Agent / Chat" not in html
+    assert "'mode-toggle':" not in app_js
     assert "chooses the right tools automatically" in html
     assert "s.mode === 'agent'" not in sessions_js
 
@@ -31,6 +35,15 @@ def test_every_frontend_turn_uses_unified_smart_routing():
     assert "fd.append('mode', 'agent')" in chat_js
     assert "fd.set('mode', 'chat')" not in chat_js
     assert "isAgentMode ? 'agent' : 'chat'" not in chat_js
+    # The visible Agent/Chat switch was removed, so its old per-submit state
+    # must not survive as a free variable that crashes every prompt.
+    assert "_isAgent" not in chat_js
+
+
+def test_stream_cleanup_can_access_streaming_tts_state():
+    chat_js = _read("static/js/chat.js")
+    assert "let streamingTTS = false;" in chat_js
+    assert "const streamingTTS =" not in chat_js
 
 
 def test_backend_ignores_legacy_mode_choice():
