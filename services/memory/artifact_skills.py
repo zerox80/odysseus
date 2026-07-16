@@ -20,14 +20,33 @@ ARTIFACT_SKILL_FILES = {
     "create-pdf-document": BUNDLED_SKILLS_ROOT / "create-pdf-document" / "SKILL.md",
 }
 
-_REQUEST_VERB = re.compile(
-    r"\b(?:create|make|generate|build|prepare|write|draft|export|convert|"
+_IMPERATIVE_REQUEST = re.compile(
+    r"(?:^\s*(?:(?:please|bitte)\s+)*"
+    r"(?:create|make|generate|build|prepare|write|draft|export|convert|"
     r"mach(?:e|en)?|erstell(?:e|en)?|erzeug(?:e|en)?|generier(?:e|en)?|"
-    r"exportier(?:e|en)?|konvertier(?:e|en)?|schreib(?:e|en)?)\b",
+    r"exportier(?:e|en)?|konvertier(?:e|en)?|schreib(?:e|en)?)\b|"
+    r"\b(?:can|could|would|will)\s+you\s+"
+    r"(?:create|make|generate|build|prepare|write|draft|export|convert)\b|"
+    r"\b(?:kannst|könntest)\s+du\b.{0,80}\b"
+    r"(?:mach(?:e|en)?|erstell(?:e|en)?|erzeug(?:e|en)?|generier(?:e|en)?|"
+    r"exportier(?:e|en)?|konvertier(?:e|en)?|schreib(?:e|en)?)\b)",
     re.IGNORECASE,
 )
-_REQUEST_SIGNAL = re.compile(
-    r"\b(?:need|want|would\s+like|please|brauche|möchte|will|bitte|soll)\b",
+_DESIRED_FORMAT_REQUEST = re.compile(
+    r"\b(?:i\s+(?:need|want|would\s+like)|"
+    r"ich\s+(?:brauche|möchte)|ich\s+will)\b.{0,40}"
+    r"(?:\bdocx\b|\.docx\b|\bword\b|\bxlsx\b|\.xlsx\b|\bexcel\b|"
+    r"\bspreadsheet\b|\bworkbook\b|\bcsv\b|\.csv\b|\bpdf\b|\.pdf\b)",
+    re.IGNORECASE,
+)
+_INFORMATIONAL_REQUEST = re.compile(
+    r"^\s*(?:what(?:'s|\s+is)|what\s+does|explain|tell\s+me\s+about|"
+    r"how\s+(?:do|can)\s+i|wie\s+(?:kann|könnte|soll)\s+ich|"
+    r"was\s+(?:ist|macht)|erklär(?:e|en)?)\b",
+    re.IGNORECASE,
+)
+_FIRST_PERSON_DECLARATION = re.compile(
+    r"^\s*(?:i\s+(?:will|am\s+going\s+to)|ich\s+werde)\b",
     re.IGNORECASE,
 )
 _FORMAT_PATTERNS = {
@@ -53,12 +72,14 @@ def iter_bundled_artifact_skills() -> Iterator[Tuple[str, Path]]:
 def artifact_skill_names_for_request(text: str) -> List[str]:
     """Return the file-generation skills explicitly requested by *text*.
 
-    Requiring an action/request signal avoids loading a creation procedure for
-    informational questions such as "What is a PDF?".  Multiple formats are
-    intentionally supported for conversion requests.
+    Mentions of a format in informational questions and first-person status
+    updates must remain normal chat. Multiple requested formats select the
+    export procedures for one canonical editor document.
     """
     text = str(text or "").strip()
-    if not text or not (_REQUEST_VERB.search(text) or _REQUEST_SIGNAL.search(text)):
+    if not text or _INFORMATIONAL_REQUEST.search(text) or _FIRST_PERSON_DECLARATION.search(text):
+        return []
+    if not (_IMPERATIVE_REQUEST.search(text) or _DESIRED_FORMAT_REQUEST.search(text)):
         return []
     return [name for name, pattern in _FORMAT_PATTERNS.items() if pattern.search(text)]
 

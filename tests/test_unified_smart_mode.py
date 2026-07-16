@@ -127,6 +127,18 @@ def test_artifact_skill_matcher_avoids_informational_mentions():
         "create-excel-workbook",
     ]
     assert artifact_skill_names_for_request("Was ist eigentlich eine PDF?") == []
+    assert artifact_skill_names_for_request("Please explain what a PDF is.") == []
+    assert artifact_skill_names_for_request("I will upload a PDF tomorrow.") == []
+    assert artifact_skill_names_for_request("How do I export this as a PDF?") == []
+
+
+def test_artifact_skill_matcher_accepts_only_explicit_creation_requests():
+    assert artifact_skill_names_for_request("Could you create a PDF report?") == [
+        "create-pdf-document",
+    ]
+    assert artifact_skill_names_for_request("I need an Excel workbook") == [
+        "create-excel-workbook",
+    ]
 
 
 def test_exact_random_excel_request_selects_excel_skill():
@@ -199,6 +211,8 @@ def test_agent_loop_uses_compact_task_anchored_artifact_path():
     assert "Automatically loaded Odysseus artifact skills" in loop
     assert "def _minimal_artifact_messages(" in loop
     assert "CURRENT USER REQUEST -- this is the task to execute now" in loop
+    assert "Create exactly one canonical source document" in loop
+    assert "in allen angeforderten Formaten speichern" in loop
     assert '_relevant_tools = {"create_document"}' in loop
     assert "artifact turn discarded non-create tool call(s)" in loop
     assert "artifact-without-tool retry=" in loop

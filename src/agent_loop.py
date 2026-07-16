@@ -1422,8 +1422,11 @@ def _minimal_artifact_messages(
 
     Small/local models can mistake Odysseus' full agent rules and skill index
     for the user's request, even when the real user turn is technically last.
-    Artifact turns only need one tool, so keep the complete selected SKILL.md
-    procedure, a little recent context, and an unmistakable final task anchor.
+    Artifact turns create one canonical editor document, so keep the complete
+    selected SKILL.md procedure, a little recent context, and an unmistakable
+    final task anchor. The editor can export that source in every requested
+    format; creating multiple competing editor documents would hide all but
+    the final one from the user.
     """
     latest = _extract_last_user_message(messages).strip()
     skill_text = "\n\n".join(
@@ -1434,7 +1437,9 @@ def _minimal_artifact_messages(
         f"{ODYSSEUS_IDENTITY}\n"
         "The next user message is the specific current task. Execute it now. "
         "Never claim that no request was provided and never answer with a menu of capabilities.\n"
-        "Create the requested deliverable with the `create_document` function. "
+        "Create exactly one canonical source document with the `create_document` function. "
+        "If several export formats were requested, prepare the same source for all of them; "
+        "do not create duplicate documents. "
         "When native function calling is available, call that function directly. "
         "Otherwise emit exactly one fenced block in this format:\n"
         "```create_document\n<title>\n<language>\n<complete content>\n```\n"
@@ -3774,7 +3779,7 @@ async def stream_agent_loop(
             else:
                 if len(tool_blocks) > 1:
                     logger.info(
-                        "[agent] artifact turn keeping first create_document and dropping extras: %s",
+                        "[agent] artifact turn keeping one canonical create_document and dropping duplicate sources: %s",
                         [block.tool_type for block in tool_blocks],
                     )
                 tool_blocks = [tool_blocks[create_idx]]
@@ -4599,7 +4604,21 @@ async def stream_agent_loop(
 
         if _artifact_tool_completed:
             _artifact_names = {name for name, _ in _artifact_skills}
+            _export_steps = []
             if "create-excel-workbook" in _artifact_names:
+                _export_steps.append("**Export as Excel (.xlsx)**")
+            if "create-pdf-document" in _artifact_names:
+                _export_steps.append("**Print as PDF**")
+            if "create-docx-document" in _artifact_names:
+                _export_steps.append("**Export as Word**")
+            if len(_export_steps) > 1:
+                confirmation = (
+                    "Fertig -- der gemeinsame Ausgangsinhalt ist im Editor geöffnet. "
+                    "Dort kannst du ihn in allen angeforderten Formaten speichern: "
+                    + ", ".join(_export_steps)
+                    + "."
+                )
+            elif "create-excel-workbook" in _artifact_names:
                 confirmation = (
                     "Fertig -- die Excel-Liste ist im Editor geöffnet. "
                     "Dort kannst du sie mit **Export as Excel (.xlsx)** speichern."

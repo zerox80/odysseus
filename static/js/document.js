@@ -9835,7 +9835,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     const number = csvPlainNumber(raw);
     const percentHint = /%|prozent|percent|marge|margin|quote|rate|anteil/.test(label) || /%$/.test(raw);
     const currencyHint = currency || /umsatz|revenue|gewinn|profit|kosten|cost|preis|price|betrag|amount/.test(label);
-    if (/^\d{4}-\d{2}-\d{2}$/.test(raw) || /^\d{1,2}\.\d{1,2}\.\d{4}$/.test(raw)) return { type: 'date' };
+    if (csvDateValue(raw)) return { type: 'date' };
     if (number !== null && percentHint) return { type: 'percent' };
     if (number !== null && currencyHint) return { type: 'currency', currency: currency || 'EUR' };
     if (number !== null) return { type: Number.isInteger(number) ? 'integer' : 'number' };
@@ -9845,9 +9845,25 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
   function csvDateValue(value) {
     const raw = String(value || '').trim();
     let match = raw.match(/^(\d{4})-(\d{2})-(\d{2})$/);
-    if (match) return new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+    if (match) {
+      const year = Number(match[1]);
+      const month = Number(match[2]);
+      const day = Number(match[3]);
+      const date = new Date(year, month - 1, day);
+      return date.getFullYear() === year && date.getMonth() === month - 1 && date.getDate() === day
+        ? date
+        : null;
+    }
     match = raw.match(/^(\d{1,2})\.(\d{1,2})\.(\d{4})$/);
-    if (match) return new Date(Number(match[3]), Number(match[2]) - 1, Number(match[1]));
+    if (match) {
+      const day = Number(match[1]);
+      const month = Number(match[2]);
+      const year = Number(match[3]);
+      const date = new Date(year, month - 1, day);
+      return date.getFullYear() === year && date.getMonth() === month - 1 && date.getDate() === day
+        ? date
+        : null;
+    }
     return null;
   }
 
