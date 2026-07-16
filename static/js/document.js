@@ -9376,20 +9376,18 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     try {
       await ensureXlsxForExport();
       const csv = textarea.value || '';
-      const workbook = window.XLSX.read(csv, { type: 'string', raw: true });
-      const originalName = workbook.SheetNames[0];
       const title = docs.get(activeDocId)?.title || 'Sheet1';
       const sheetName = title
         .replace(/[\\\/\?\*\[\]\:]/g, '_')
         .trim()
         .slice(0, 31) || 'Sheet1';
-      if (originalName && originalName !== sheetName) {
-        workbook.Sheets[sheetName] = workbook.Sheets[originalName];
-        delete workbook.Sheets[originalName];
-        workbook.SheetNames[0] = sheetName;
-      }
-      window.XLSX.writeFile(workbook, _getExportBaseName() + '.xlsx');
-      if (uiModule) uiModule.showToast('Exported as Excel workbook');
+      const workbook = buildProfessionalWorkbook(csv, title, sheetName);
+      window.XLSX.writeFile(workbook, _getExportBaseName() + '.xlsx', {
+        compression: true,
+        cellDates: true,
+        cellStyles: true,
+      });
+      if (uiModule) uiModule.showToast('Professional Excel workbook exported');
     } catch (err) {
       if (uiModule) uiModule.showError('Excel export failed: ' + (err.message || err));
     }
@@ -9809,8 +9807,150 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     return rows;
   }
 
+  function csvCurrencyFor(header, value = '') {
+    const hint = `${header || ''} ${value || ''}`.toLowerCase();
+    if (/\b(?:usd|dollar)\b|\$/.test(hint)) return 'USD';
+    if (/\b(?:gbp|pound)\b|£/.test(hint)) return 'GBP';
+    if (/\b(?:chf|franken)\b/.test(hint)) return 'CHF';
+    if (/\b(?:eur|euro)\b|€/.test(hint)) return 'EUR';
+    return '';
+  }
+
+  function csvPlainNumber(value) {
+    const raw = String(value ?? '').trim();
+    if (!raw || /^[-+]?0\d+/.test(raw)) return null;
+    const cleaned = raw
+      .replace(/[€$£]/g, '')
+      .replace(/\s/g, '')
+      .replace(/%$/, '');
+    if (!/^[-+]?(?:\d+\.?\d*|\.\d+)$/.test(cleaned)) return null;
+    const number = Number(cleaned);
+    return Number.isFinite(number) ? number : null;
+  }
+
+  function csvCellKind(value, header = '') {
+    const raw = String(value ?? '').trim();
+    const label = String(header || '').toLowerCase();
+    const currency = csvCurrencyFor(label, raw);
+    const number = csvPlainNumber(raw);
+    const percentHint = /%|prozent|percent|marge|margin|quote|rate|anteil/.test(label) || /%$/.test(raw);
+    const currencyHint = currency || /umsatz|revenue|gewinn|profit|kosten|cost|preis|price|betrag|amount/.test(label);
+    if (/^\d{4}-\d{2}-\d{2}$/.test(raw) || /^\d{1,2}\.\d{1,2}\.\d{4}$/.test(raw)) return { type: 'date' };
+    if (number !== null && percentHint) return { type: 'percent' };
+    if (number !== null && currencyHint) return { type: 'currency', currency: currency || 'EUR' };
+    if (number !== null) return { type: Number.isInteger(number) ? 'integer' : 'number' };
+    return { type: 'text' };
+  }
+
+  function csvDateValue(value) {
+    const raw = String(value || '').trim();
+    let match = raw.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (match) return new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+    match = raw.match(/^(\d{1,2})\.(\d{1,2})\.(\d{4})$/);
+    if (match) return new Date(Number(match[3]), Number(match[2]) - 1, Number(match[1]));
+    return null;
+  }
+
+  function csvTypedValue(value, kind) {
+    const raw = String(value ?? '').trim();
+    if (!raw) return '';
+    if (kind.type === 'date') return csvDateValue(raw) || raw;
+    if (kind.type === 'percent') {
+      const number = csvPlainNumber(raw);
+      if (number === null) return raw;
+      return /%$/.test(raw) || Math.abs(number) > 1 ? number / 100 : number;
+    }
+    if (kind.type === 'currency' || kind.type === 'integer' || kind.type === 'number') {
+      return csvPlainNumber(raw) ?? raw;
+    }
+    return raw;
+  }
+
+  function csvDisplayValue(value, kind) {
+    const raw = String(value ?? '').trim();
+    if (!raw) return '';
+    if (kind.type === 'date') {
+      const date = csvDateValue(raw);
+      return date ? new Intl.DateTimeFormat(undefined, { dateStyle: 'medium' }).format(date) : raw;
+    }
+    const typed = csvTypedValue(raw, kind);
+    if (typeof typed !== 'number') return raw;
+    if (kind.type === 'currency') {
+      return new Intl.NumberFormat(undefined, { style: 'currency', currency: kind.currency || 'EUR' }).format(typed);
+    }
+    if (kind.type === 'percent') {
+      return new Intl.NumberFormat(undefined, { style: 'percent', minimumFractionDigits: 1, maximumFractionDigits: 1 }).format(typed);
+    }
+    return new Intl.NumberFormat(undefined, {
+      maximumFractionDigits: kind.type === 'integer' ? 0 : 2,
+    }).format(typed);
+  }
+
+  function csvNumberFormat(kind) {
+    if (kind.type === 'date') return 'dd.mm.yyyy';
+    if (kind.type === 'percent') return '0.0%';
+    if (kind.type === 'currency') {
+      if (kind.currency === 'USD') return '$#,##0.00';
+      if (kind.currency === 'GBP') return '£#,##0.00';
+      if (kind.currency === 'CHF') return '#,##0.00 "CHF"';
+      return '#,##0.00 [$€-407]';
+    }
+    if (kind.type === 'integer') return '#,##0';
+    if (kind.type === 'number') return '#,##0.00';
+    return null;
+  }
+
+  function buildProfessionalWorkbook(csv, title, sheetName) {
+    const rows = parseCSV(csv);
+    if (!rows.length) throw new Error('The spreadsheet is empty.');
+    const colCount = Math.max(...rows.map(row => row.length));
+    const headers = Array.from({ length: colCount }, (_, col) => String(rows[0][col] || '').trim() || `Column ${col + 1}`);
+    const normalized = rows.map((row, rowIndex) => Array.from({ length: colCount }, (_, col) => {
+      const raw = rowIndex === 0 ? headers[col] : String(row[col] ?? '');
+      return rowIndex === 0 ? raw : csvTypedValue(raw, csvCellKind(raw, headers[col]));
+    }));
+    const worksheet = window.XLSX.utils.aoa_to_sheet(normalized, { cellDates: true });
+    const range = window.XLSX.utils.decode_range(worksheet['!ref']);
+
+    for (let row = 1; row <= range.e.r; row++) {
+      for (let col = 0; col <= range.e.c; col++) {
+        const address = window.XLSX.utils.encode_cell({ r: row, c: col });
+        const cell = worksheet[address];
+        if (!cell) continue;
+        const raw = String(rows[row]?.[col] ?? '');
+        const format = csvNumberFormat(csvCellKind(raw, headers[col]));
+        if (format) cell.z = format;
+      }
+    }
+
+    worksheet['!cols'] = headers.map((header, col) => {
+      let width = String(header).length + 3;
+      for (let row = 1; row < rows.length; row++) {
+        const raw = String(rows[row]?.[col] ?? '');
+        width = Math.max(width, csvDisplayValue(raw, csvCellKind(raw, header)).length + 2);
+      }
+      return { wch: Math.min(42, Math.max(11, width)) };
+    });
+    worksheet['!rows'] = [{ hpt: 27 }];
+    worksheet['!autofilter'] = { ref: window.XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: range.e.r, c: range.e.c } }) };
+    worksheet['!freeze'] = { xSplit: 0, ySplit: 1, topLeftCell: 'A2', activePane: 'bottomLeft', state: 'frozen' };
+    worksheet['!margins'] = { left: 0.4, right: 0.4, top: 0.6, bottom: 0.6, header: 0.2, footer: 0.2 };
+
+    const workbook = window.XLSX.utils.book_new();
+    window.XLSX.utils.book_append_sheet(workbook, worksheet, sheetName);
+    workbook.Props = {
+      Title: title,
+      Subject: 'Professional spreadsheet created with Odysseus',
+      Author: 'Odysseus',
+      Company: 'Odysseus',
+      CreatedDate: new Date(),
+    };
+    return workbook;
+  }
+
   /** Escape a CSV field (quote if it contains comma, quote, or newline) */
   function csvEscapeField(val) {
+    val = String(val ?? '');
     if (val.includes(',') || val.includes('"') || val.includes('\n')) {
       return '"' + val.replace(/"/g, '""') + '"';
     }
@@ -9824,10 +9964,10 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     const lines = [];
     // Header
     const ths = table.querySelectorAll('thead th');
-    if (ths.length) lines.push([...ths].map(th => csvEscapeField(th.textContent)).join(','));
+    if (ths.length) lines.push([...ths].map(th => csvEscapeField(th.dataset.value ?? th.textContent)).join(','));
     // Body
     table.querySelectorAll('tbody tr').forEach(tr => {
-      const cells = [...tr.querySelectorAll('td')].map(td => csvEscapeField(td.textContent));
+      const cells = [...tr.querySelectorAll('td')].map(td => csvEscapeField(td.dataset.value ?? td.textContent));
       lines.push(cells.join(','));
     });
     textarea.value = lines.join('\n') + '\n';
@@ -9859,28 +9999,96 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
         outputPanel.innerHTML = '<pre class="doc-run-error">No data — CSV is empty or unparseable.</pre>';
         return;
       } else {
-        const esc = s => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
         const colCount = Math.max(...rows.map(r => r.length));
-        let html = '<div class="csv-table-wrap"><table class="csv-table"><thead><tr>';
-        for (let j = 0; j < colCount; j++) {
-          html += `<th contenteditable="true">${esc(rows[0][j] || '')}</th>`;
-        }
-        html += '</tr></thead><tbody>';
-        for (let i = 1; i < rows.length; i++) {
-          html += '<tr>';
-          for (let j = 0; j < colCount; j++) {
-            html += `<td contenteditable="true">${esc(rows[i][j] || '')}</td>`;
+        const headers = Array.from({ length: colCount }, (_, col) => rows[0][col] || `Column ${col + 1}`);
+        preview.innerHTML = '';
+        const shell = document.createElement('div');
+        shell.className = 'csv-workbook-shell';
+        const header = document.createElement('div');
+        header.className = 'csv-workbook-header';
+        const identity = document.createElement('div');
+        identity.className = 'csv-workbook-identity';
+        const title = document.createElement('strong');
+        title.className = 'csv-workbook-title';
+        title.textContent = docs.get(activeDocId)?.title || 'Spreadsheet';
+        const meta = document.createElement('span');
+        meta.className = 'csv-workbook-meta';
+        meta.textContent = `${Math.max(0, rows.length - 1)} rows · ${colCount} columns`;
+        identity.append(title, meta);
+        const actions = document.createElement('div');
+        actions.className = 'csv-workbook-actions';
+        const badge = document.createElement('span');
+        badge.className = 'csv-workbook-badge';
+        badge.textContent = 'Excel ready';
+        const addButton = document.createElement('button');
+        addButton.type = 'button';
+        addButton.className = 'csv-add-row-btn';
+        addButton.textContent = '+ Add row';
+        actions.append(badge, addButton);
+        header.append(identity, actions);
+
+        const tableWrap = document.createElement('div');
+        tableWrap.className = 'csv-table-wrap';
+        const table = document.createElement('table');
+        table.className = 'csv-table';
+        const thead = document.createElement('thead');
+        const headRow = document.createElement('tr');
+        headers.forEach(value => {
+          const th = document.createElement('th');
+          th.contentEditable = 'true';
+          th.spellcheck = false;
+          th.dataset.value = value;
+          th.textContent = value;
+          headRow.appendChild(th);
+        });
+        thead.appendChild(headRow);
+        const tbody = document.createElement('tbody');
+        const presentCell = (cell, raw, col) => {
+          const kind = csvCellKind(raw, headers[col]);
+          cell.dataset.value = raw;
+          cell.dataset.cellKind = kind.type;
+          cell.className = `csv-cell-${kind.type}`;
+          cell.textContent = csvDisplayValue(raw, kind);
+        };
+        for (let rowIndex = 1; rowIndex < rows.length; rowIndex++) {
+          const tr = document.createElement('tr');
+          const firstValue = String(rows[rowIndex][0] || '').trim();
+          if (/^(?:total|totals|gesamt|summe|subtotal|zwischensumme)\b/i.test(firstValue)) tr.classList.add('csv-summary-row');
+          for (let col = 0; col < colCount; col++) {
+            const td = document.createElement('td');
+            td.contentEditable = 'true';
+            td.spellcheck = false;
+            presentCell(td, String(rows[rowIndex][col] ?? ''), col);
+            tr.appendChild(td);
           }
-          html += '</tr>';
+          tbody.appendChild(tr);
         }
-        html += '</tbody></table>';
-        html += '</div>';
-        preview.innerHTML = html;
+        table.append(thead, tbody);
+        tableWrap.appendChild(table);
+        shell.append(header, tableWrap);
+        preview.appendChild(shell);
 
         // Sync edits back to textarea
-        const table = preview.querySelector('.csv-table');
         if (table) {
-          table.addEventListener('input', () => syncTableToTextarea(preview, textarea));
+          table.addEventListener('focusin', (event) => {
+            const cell = event.target.closest('td,th');
+            if (cell) cell.textContent = cell.dataset.value ?? cell.textContent;
+          });
+          table.addEventListener('input', (event) => {
+            const cell = event.target.closest('td,th');
+            if (cell) cell.dataset.value = cell.textContent;
+            syncTableToTextarea(preview, textarea);
+          });
+          table.addEventListener('focusout', (event) => {
+            const cell = event.target.closest('td,th');
+            if (!cell) return;
+            cell.dataset.value = cell.textContent;
+            if (cell.tagName === 'TD') {
+              const col = [...cell.parentElement.children].indexOf(cell);
+              presentCell(cell, cell.dataset.value, col);
+            }
+            syncTableToTextarea(preview, textarea);
+          });
           // Prevent Enter from creating <br> inside cells
           table.addEventListener('keydown', (e) => {
             if (e.key === 'Enter' && !e.shiftKey) {
@@ -9912,9 +10120,12 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
             for (let j = 0; j < colCount; j++) {
               const td = document.createElement('td');
               td.contentEditable = 'true';
+              td.spellcheck = false;
+              presentCell(td, '', j);
               tr.appendChild(td);
             }
             tbody.appendChild(tr);
+            meta.textContent = `${tbody.children.length} rows · ${colCount} columns`;
             tr.children[0].focus();
             syncTableToTextarea(preview, textarea);
           });

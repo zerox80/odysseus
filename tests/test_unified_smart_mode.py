@@ -66,6 +66,27 @@ def test_document_editor_can_export_csv_as_real_xlsx():
     assert (ROOT / "static/lib/xlsx.full.min.js").is_file()
 
 
+def test_spreadsheets_receive_professional_preview_and_export_defaults():
+    document_js = _read("static/js/document.js")
+    style = _read("static/style.css")
+    excel_skill = _read(
+        "services/memory/bundled_skills/create-excel-workbook/SKILL.md"
+    )
+
+    assert "buildProfessionalWorkbook" in document_js
+    assert "worksheet['!cols']" in document_js
+    assert "worksheet['!autofilter']" in document_js
+    assert "worksheet['!freeze']" in document_js
+    assert "cellStyles: true" in document_js
+    assert "csvDisplayValue" in document_js
+    assert ".csv-workbook-header" in style
+    assert ".csv-table thead th" in style
+    assert ".csv-table td.csv-cell-currency" in style
+    assert "position: sticky" in style
+    assert "plausible and internally consistent sample values" in excel_skill
+    assert "verify every calculation" in excel_skill
+
+
 def test_file_requests_are_classified_for_automatic_document_tools():
     for prompt in (
         "Create an Excel spreadsheet with a monthly budget",
