@@ -1,0 +1,23 @@
+name: TypeScript and Rust source limits
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: source-limits-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  source-limits:
+    name: Max 500 lines / 120 characters
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Check TypeScript and Rust files
+        run: python3 .github/scripts/check-code-limits.py

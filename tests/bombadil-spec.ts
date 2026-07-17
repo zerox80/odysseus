@@ -46,7 +46,10 @@ const visibleModals = extract((state) => {
 
 const clickableElements = extract((state) => {
   const els: { name: string; x: number; y: number }[] = [];
-  const selectors = "button:not([disabled]),.list-item,.icon-rail-btn,.section-header-flex,.send-btn,.sidebar-brand,input[type=checkbox]";
+  const selectors = [
+    "button:not([disabled]),.list-item,.icon-rail-btn,.section-header-flex,",
+    ".send-btn,.sidebar-brand,input[type=checkbox]",
+  ].join("");
   state.document.querySelectorAll(selectors).forEach((el: any) => {
     if (el.offsetParent === null) return;
     const rect = el.getBoundingClientRect();
