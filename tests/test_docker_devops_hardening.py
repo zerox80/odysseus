@@ -100,6 +100,17 @@ def test_docker_entrypoint_does_not_resolve_root_commands_from_app_local_path():
     assert final_exec > path_export
 
 
+def test_docker_entrypoint_fails_when_initial_admin_setup_fails():
+    script = (ROOT / "docker" / "entrypoint.sh").read_text(encoding="utf-8")
+    setup_line = next(
+        line for line in script.splitlines()
+        if '"$PYTHON_BIN" /app/setup.py' in line
+    )
+
+    assert "|| true" not in setup_line
+    assert setup_line.strip().startswith('"$GOSU_BIN"')
+
+
 def test_docker_entrypoint_ownership_repair_stays_inside_expected_mounts():
     script = (ROOT / "docker" / "entrypoint.sh").read_text(encoding="utf-8")
     assert "find /app -xdev" in script

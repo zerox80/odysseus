@@ -205,6 +205,61 @@ def test_setup_accepts_exactly_min_length_password(tmp_path):
     assert result == {"ok": True, "message": "Admin account created"}
 
 
+def test_setup_rejects_remote_request_without_bootstrap_token(tmp_path, monkeypatch):
+    monkeypatch.delenv("ODYSSEUS_SETUP_TOKEN", raising=False)
+    mgr = _make_manager(tmp_path)
+    endpoint, SetupRequest = _setup_endpoint(mgr)
+    request = SimpleNamespace(
+        client=SimpleNamespace(host="203.0.113.10"),
+        headers={},
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(endpoint(
+            body=SetupRequest(username="admin", password="strong-password"),
+            request=request,
+        ))
+
+    assert exc.value.status_code == 403
+    assert mgr.is_configured is False
+
+
+def test_setup_does_not_trust_loopback_reverse_proxy(tmp_path, monkeypatch):
+    monkeypatch.delenv("ODYSSEUS_SETUP_TOKEN", raising=False)
+    mgr = _make_manager(tmp_path)
+    endpoint, SetupRequest = _setup_endpoint(mgr)
+    request = SimpleNamespace(
+        client=SimpleNamespace(host="127.0.0.1"),
+        headers={"x-forwarded-for": "203.0.113.10"},
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(endpoint(
+            body=SetupRequest(username="admin", password="strong-password"),
+            request=request,
+        ))
+
+    assert exc.value.status_code == 403
+    assert mgr.is_configured is False
+
+
+def test_setup_accepts_remote_request_with_bootstrap_token(tmp_path, monkeypatch):
+    monkeypatch.setenv("ODYSSEUS_SETUP_TOKEN", "bootstrap-secret")
+    mgr = _make_manager(tmp_path)
+    endpoint, SetupRequest = _setup_endpoint(mgr)
+    request = SimpleNamespace(
+        client=SimpleNamespace(host="203.0.113.10"),
+        headers={"X-Odysseus-Setup-Token": "bootstrap-secret"},
+    )
+
+    result = asyncio.run(endpoint(
+        body=SetupRequest(username="admin", password="strong-password"),
+        request=request,
+    ))
+
+    assert result == {"ok": True, "message": "Admin account created"}
+
+
 def test_setup_rejects_seven_char_password(tmp_path):
     mgr = _make_manager(tmp_path)
     endpoint, SetupRequest = _setup_endpoint(mgr)

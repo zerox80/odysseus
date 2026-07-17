@@ -68,6 +68,8 @@ from src.auth_helpers import effective_user  # noqa: E402
 
 
 def _req(**state):
+    if state.get("api_token") and "api_token_scopes" not in state:
+        state["api_token_scopes"] = ["chat"]
     return SimpleNamespace(state=SimpleNamespace(**state))
 
 

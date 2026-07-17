@@ -2687,6 +2687,7 @@ async def stream_agent_loop(
     reasoning_effort: Optional[str] = None,
     workload: str = "foreground",
     _is_teacher_run: bool = False,
+    principal_is_api_token: bool = False,
 ) -> AsyncGenerator[str, None]:
     """Streaming agent loop generator.
 
@@ -2707,7 +2708,11 @@ async def stream_agent_loop(
         if tool_policy.disable_mcp:
             mcp_mgr = None
     guide_only = bool(tool_policy and tool_policy.mode == "guide_only")
-    public_blocked_tools = blocked_tools_for_owner(owner)
+    public_blocked_tools = (
+        blocked_tools_for_owner(owner, force_unprivileged=True)
+        if principal_is_api_token
+        else blocked_tools_for_owner(owner)
+    )
     if public_blocked_tools:
         disabled_tools.update(public_blocked_tools)
         # MCP tools are namespaced dynamically, so hide all MCP schemas for
@@ -4233,6 +4238,7 @@ async def stream_agent_loop(
                             owner=owner,
                             progress_cb=_push_progress,
                             workspace=workspace,
+                            principal_is_api_token=principal_is_api_token,
                         )
                     finally:
                         # Sentinel so the drainer knows to stop.

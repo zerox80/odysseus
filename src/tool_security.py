@@ -259,8 +259,15 @@ def owner_is_admin_or_single_user(owner: Optional[str]) -> bool:
         return False
 
 
-def blocked_tools_for_owner(owner: Optional[str]) -> Set[str]:
-    """Tools to hide/disable for this owner under public-user policy."""
-    if owner_is_admin_or_single_user(owner):
+def blocked_tools_for_owner(
+    owner: Optional[str], *, force_unprivileged: bool = False
+) -> Set[str]:
+    """Tools to hide/disable for this owner under public-user policy.
+
+    ``force_unprivileged`` is used for integration principals such as API
+    tokens. A token may be owned by an admin for attribution, but must never
+    inherit that human's host-level tool privileges.
+    """
+    if not force_unprivileged and owner_is_admin_or_single_user(owner):
         return set()
     return set(NON_ADMIN_BLOCKED_TOOLS)

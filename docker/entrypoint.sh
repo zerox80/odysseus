@@ -168,8 +168,9 @@ umask 0007
 
 # Run first-time setup as the app user so data/ files get the right ownership.
 # setup.py is idempotent — skips auth.json / .env if they already exist.
-# || true so a setup failure never prevents the container from starting.
-"$GOSU_BIN" "$ODY_USER" "$PYTHON_BIN" /app/setup.py || true
+# A missing initial admin is a security-critical startup failure, so preserve
+# setup.py's non-zero exit status instead of launching an unconfigured app.
+"$GOSU_BIN" "$ODY_USER" "$PYTHON_BIN" /app/setup.py
 
 # Drop root and run the actual app. `gosu` is preferred over `su` /
 # `sudo` because it cleans up the process tree (no extra shell layer)

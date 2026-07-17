@@ -8,12 +8,19 @@ from fastapi import HTTPException
 from src import auth_helpers
 
 
-def _request(*, current_user="api", api_token=True, api_token_owner="alice"):
+def _request(
+    *,
+    current_user="api",
+    api_token=True,
+    api_token_owner="alice",
+    api_token_scopes=("chat",),
+):
     return SimpleNamespace(
         state=SimpleNamespace(
             current_user=current_user,
             api_token=api_token,
             api_token_owner=api_token_owner,
+            api_token_scopes=api_token_scopes,
         ),
         app=SimpleNamespace(
             state=SimpleNamespace(
@@ -39,6 +46,16 @@ def test_require_authenticated_request_allows_api_token_owner(monkeypatch):
     req = _request()
 
     assert auth_helpers.require_authenticated_request(req) == "alice"
+
+
+def test_effective_user_rejects_token_without_chat_scope():
+    req = _request(api_token_scopes=("todos:read",))
+
+    with pytest.raises(HTTPException) as exc:
+        auth_helpers.effective_user(req)
+
+    assert exc.value.status_code == 403
+    assert "chat" in exc.value.detail
 
 
 def test_codex_as_owner_can_call_nested_user_routes(monkeypatch):

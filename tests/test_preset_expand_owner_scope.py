@@ -68,7 +68,8 @@ def test_expand_attributes_bearer_token_to_its_owner(monkeypatch):
     endpoint = _expand_endpoint()
 
     req = _FakeRequest({"name": "Pirate", "model": ""},
-                       current_user="api", api_token=True, api_token_owner="bob")
+                       current_user="api", api_token=True, api_token_owner="bob",
+                       api_token_scopes=["chat"])
     asyncio.run(endpoint(req))
 
     assert seen["owner"] == "bob"

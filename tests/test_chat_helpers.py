@@ -627,6 +627,7 @@ async def test_build_chat_context_uses_api_token_owner_for_compaction_scope(monk
         {
             "api_token": True,
             "api_token_owner": "alice",
+            "api_token_scopes": ["chat"],
             "current_user": "api",
         },
     )

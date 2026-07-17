@@ -1,8 +1,17 @@
 """Shared auth helpers used by all route files."""
 
+import logging
 import os
 from typing import Optional
 from fastapi import Request, HTTPException
+
+from core.auth import DEFAULT_PRIVILEGES
+
+
+logger = logging.getLogger(__name__)
+_BOOLEAN_PRIVILEGES = frozenset(
+    key for key, default in DEFAULT_PRIVILEGES.items() if isinstance(default, bool)
+)
 
 
 def get_current_user(request: Request) -> Optional[str]:
@@ -28,6 +37,7 @@ def effective_user(request: Request) -> Optional[str]:
     never escalates.
     """
     if getattr(request.state, "api_token", False):
+        require_api_token_scope(request, "chat")
         owner = getattr(request.state, "api_token_owner", None)
         if owner:
             return owner
@@ -39,6 +49,20 @@ def _is_api_token_request(request: Request) -> bool:
     return bool(getattr(request.state, "api_token", False))
 
 
+def api_token_scopes(request: Request) -> set[str]:
+    """Return normalized scopes stamped by bearer authentication."""
+    raw = getattr(request.state, "api_token_scopes", None) or []
+    if isinstance(raw, str):
+        raw = raw.split(",")
+    return {str(scope).strip() for scope in raw if str(scope).strip()}
+
+
+def require_api_token_scope(request: Request, scope: str) -> None:
+    """Require ``scope`` when the caller is a bearer token."""
+    if _is_api_token_request(request) and scope not in api_token_scopes(request):
+        raise HTTPException(403, f"API token missing required scope: {scope}")
+
+
 def require_authenticated_request(request: Request) -> str:
     """Allow either a browser session or a valid bearer API token.
 
@@ -48,7 +72,10 @@ def require_authenticated_request(request: Request) -> str:
     sessions or their own API-token scope/owner gate.
     """
     if _is_api_token_request(request):
-        return effective_user(request) or ""
+        owner = getattr(request.state, "api_token_owner", None)
+        if not owner:
+            raise HTTPException(403, "API token has no owner")
+        return owner
     return require_user(request)
 
 
@@ -121,18 +148,21 @@ def require_privilege(request: Request, key: str) -> str:
     user = require_user(request)
     if not user:
         return user
+    if key not in _BOOLEAN_PRIVILEGES:
+        logger.error("Unknown boolean privilege requested: %s", key)
+        raise HTTPException(500, "Unknown privilege policy")
     auth_mgr = getattr(request.app.state, "auth_manager", None)
     if auth_mgr is None:
-        return user
+        raise HTTPException(503, "Authorization service unavailable")
     try:
-        privs = auth_mgr.get_privileges(user) or {}
+        privs = auth_mgr.get_privileges(user)
     except Exception:
-        return user
-    if not isinstance(privs, dict):
-        privs = {}
-    # True = permitted; missing key defaults to permitted (unknown privileges
-    # fail open — the UI gates display-side).
-    if not privs.get(key, True):
+        logger.exception("Privilege lookup failed for user=%r key=%s", user, key)
+        raise HTTPException(503, "Authorization service unavailable")
+    if not isinstance(privs, dict) or key not in privs or not isinstance(privs[key], bool):
+        logger.error("Malformed privilege data for user=%r key=%s", user, key)
+        raise HTTPException(503, "Authorization service unavailable")
+    if not privs[key]:
         raise HTTPException(403, f"Your account is not allowed to {key.replace('_', ' ')}.")
     return user
 

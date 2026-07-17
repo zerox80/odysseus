@@ -1019,10 +1019,12 @@ async def do_generate_image(content: str, session_id: Optional[str] = None, owne
             image_id = None
 
             def _save_to_gallery(filename: str) -> str:
-                """Insert a GalleryImage row and return the new id (or '')."""
+                """Persist the authorization row or remove the orphaned file."""
+                new_id = str(uuid.uuid4())
+                _gdb = None
                 try:
                     from src.database import SessionLocal as _GallerySL, GalleryImage
-                    new_id = str(uuid.uuid4())
+
                     _gdb = _GallerySL()
                     _gdb.add(GalleryImage(
                         id=new_id,
@@ -1035,11 +1037,29 @@ async def do_generate_image(content: str, session_id: Optional[str] = None, owne
                         owner=owner,
                     ))
                     _gdb.commit()
-                    _gdb.close()
                     return new_id
                 except Exception as _ge:
-                    logger.warning(f"Failed to save gallery record: {_ge}")
-                    return ""
+                    if _gdb is not None:
+                        try:
+                            _gdb.rollback()
+                        except Exception:
+                            pass
+                    try:
+                        (Path(GENERATED_IMAGES_DIR) / filename).unlink(missing_ok=True)
+                    except Exception as _cleanup_error:
+                        logger.error(
+                            "Failed to remove orphaned generated image %s: %s",
+                            filename,
+                            _cleanup_error,
+                        )
+                    logger.exception("Failed to save gallery authorization record")
+                    raise RuntimeError("Generated image metadata could not be persisted") from _ge
+                finally:
+                    if _gdb is not None:
+                        try:
+                            _gdb.close()
+                        except Exception:
+                            logger.warning("Failed to close gallery database session", exc_info=True)
 
             # GPT image models always return b64_json; DALL-E may return url
             if img.get("b64_json"):
@@ -1054,6 +1074,7 @@ async def do_generate_image(content: str, session_id: Optional[str] = None, owne
             elif img.get("url"):
                 # Download external URL and save locally (DALL-E returns temp URLs)
                 result_url = img["url"]
+                downloaded_filename = None
                 try:
                     pinned_ip = validated_outbound_ips(
                         result_url,
@@ -1074,12 +1095,17 @@ async def do_generate_image(content: str, session_id: Optional[str] = None, owne
                         img_path = img_dir / filename
                         img_path.write_bytes(dl_resp.content)
                         image_url = f"/api/generated-image/{filename}"
-                        image_id = _save_to_gallery(filename)
+                        downloaded_filename = filename
                     else:
                         image_url = result_url  # fallback to external URL
                 except Exception as _dl_e:
                     logger.warning(f"Failed to download DALL-E image: {_dl_e}")
                     image_url = result_url  # fallback to external URL
+                if downloaded_filename is not None:
+                    # Keep persistence outside the download fallback: an
+                    # authorization-row failure must abort instead of being
+                    # mistaken for a harmless network/download error.
+                    image_id = _save_to_gallery(downloaded_filename)
             else:
                 return {"error": "Image API returned unexpected format (no b64_json or url)"}
 

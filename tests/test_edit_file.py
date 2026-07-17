@@ -30,6 +30,15 @@ def test_blocked_tools_for_owner_includes_edit_file_for_non_admin(monkeypatch):
     assert blocked_tools_for_owner("admin") == set()
 
 
+def test_api_token_principal_never_inherits_admin_tool_access(monkeypatch):
+    monkeypatch.setattr(tool_security, "owner_is_admin_or_single_user", lambda owner: True)
+
+    blocked = blocked_tools_for_owner("admin", force_unprivileged=True)
+
+    assert "edit_file" in blocked
+    assert "bash" in blocked
+
+
 @pytest.mark.asyncio
 async def test_edit_file_blocked_at_execution_for_non_admin(monkeypatch, tmp_path):
     # Execution-level gate: a non-admin owner must be refused even if the tool
@@ -53,6 +62,31 @@ async def test_edit_file_blocked_at_execution_for_non_admin(monkeypatch, tmp_pat
         owner="bob",
     )
     assert result.get("exit_code") == 1 and "admin" in result.get("error", "").lower()
+
+
+@pytest.mark.asyncio
+async def test_edit_file_blocked_for_admin_owned_api_token(monkeypatch, tmp_path):
+    import src.tool_execution as te
+
+    monkeypatch.setattr(te, "_owner_is_admin", lambda owner: True)
+    root = tmp_path / "workspace"
+    root.mkdir()
+    monkeypatch.setenv("ODYSSEUS_AGENT_WORKSPACE_ROOT", str(root))
+    target = root / "token_blocked.txt"
+    target.write_text("a\n")
+
+    _desc, result = await te.execute_tool_block(
+        ToolBlock(
+            "edit_file",
+            json.dumps({"path": str(target), "old_string": "a", "new_string": "b"}),
+        ),
+        owner="admin",
+        principal_is_api_token=True,
+    )
+
+    assert result.get("exit_code") == 1
+    assert "admin" in result.get("error", "").lower()
+    assert target.read_text() == "a\n"
 
 
 # ── Behavior ──────────────────────────────────────────────────────────────

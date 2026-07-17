@@ -297,7 +297,8 @@ def main():
         print("Admin creation did not happen: a system or file error occurred.\nCheck write permissions for the 'data' directory and rerun setup.\n")
     else:  # handling "failed" or any unhandled edge case
         print("Admin creation did not happen: a system or file error occurred.\nCheck write permissions for the 'data' directory and rerun setup.\n")
+    return 0 if admin_status in {"created", "exists"} else 1
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

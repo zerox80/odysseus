@@ -15,8 +15,33 @@ from starlette.responses import Response
 # same value from this module. Never persisted or exposed externally.
 INTERNAL_TOOL_TOKEN = os.environ.get("ODYSSEUS_INTERNAL_TOKEN") or secrets.token_hex(32)
 INTERNAL_TOOL_HEADER = "X-Odysseus-Internal-Token"
-# Pseudo-username on in-process tool-loopback requests; require_admin trusts it and it is reserved.
+# Pseudo-username stamped only after AuthMiddleware validates a direct-loopback
+# internal token. The username is reserved and cannot be created by users.
 INTERNAL_TOOL_USER = "internal-tool"
+
+PROXY_FORWARDING_HEADERS = (
+    "cf-connecting-ip",
+    "cf-ray",
+    "cf-visitor",
+    "x-forwarded-for",
+    "x-forwarded-host",
+    "x-real-ip",
+    "forwarded",
+)
+
+
+def is_trusted_direct_loopback(request: Request) -> bool:
+    """Return True only for a direct loopback connection.
+
+    Reverse proxies often connect to the app from loopback. Any forwarding
+    marker therefore removes local trust, even when ``client.host`` is local.
+    """
+    client = getattr(request, "client", None)
+    host = getattr(client, "host", None)
+    if host not in ("127.0.0.1", "::1"):
+        return False
+    headers = getattr(request, "headers", None) or {}
+    return not any(headers.get(name) for name in PROXY_FORWARDING_HEADERS)
 
 
 def is_cors_preflight(method: str, headers) -> bool:
@@ -30,21 +55,14 @@ def is_cors_preflight(method: str, headers) -> bool:
 
 def require_admin(request: Request):
     """Raise 403 if the current user isn't an admin.
-    Allows access when auth is explicitly disabled, or when the request carries
-    the in-process internal-tool token used by loopback agent tools.
+    Allows access when auth is explicitly disabled, or when AuthMiddleware has
+    stamped the validated in-process loopback identity.
     """
-    # In-process bypass for tool-layer loopback calls. Two paths:
-    # (a) header-direct (caller set X-Odysseus-Internal-Token), or
-    # (b) the auth middleware already validated the token and stamped
-    #     request.state.current_user = "internal-tool".
-    try:
-        hdr = request.headers.get(INTERNAL_TOOL_HEADER)
-        if hdr and secrets.compare_digest(hdr, INTERNAL_TOOL_TOKEN):
-            return
-        if getattr(request.state, "current_user", None) == INTERNAL_TOOL_USER:
-            return
-    except Exception:
-        pass
+    # Trust only the identity stamped by AuthMiddleware after it validates both
+    # the secret and a direct-loopback connection. A raw header is not proof at
+    # this layer because route helpers may be invoked without that middleware.
+    if getattr(request.state, "current_user", None) == INTERNAL_TOOL_USER:
+        return
 
     auth_mgr = getattr(request.app.state, "auth_manager", None)
     if os.getenv("AUTH_ENABLED", "true").lower() == "false":

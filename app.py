@@ -67,7 +67,11 @@ from core.constants import (
     REQUEST_TIMEOUT, OPENAI_API_KEY, AUTH_FILE,
 )
 from core.database import SessionLocal, ApiToken
-from core.middleware import SecurityHeadersMiddleware, is_cors_preflight
+from core.middleware import (
+    SecurityHeadersMiddleware,
+    is_cors_preflight,
+    is_trusted_direct_loopback,
+)
 from core.auth import AuthManager, normalize_known_username
 from core.exceptions import (
     SessionNotFoundError, InvalidFileUploadError,
@@ -140,6 +144,7 @@ app.add_middleware(
         "X-Auth-Token",
         "X-Odysseus-Internal-Token",
         "X-Odysseus-Owner",
+        "X-Odysseus-Setup-Token",
         "X-Requested-With",
         "X-TZ-Offset",
     ],
@@ -328,31 +333,6 @@ if AUTH_ENABLED:
         _token_cache.update(new_map)
         app.state._token_cache_dirty = False
 
-    # Headers that prove a request was forwarded by a proxy/tunnel (cloudflared,
-    # nginx, Caddy, Tailscale Funnel, …). cloudflared connects to the app FROM
-    # 127.0.0.1, so without this check every tunneled request would look like
-    # loopback and could bypass auth.
-    _PROXY_FWD_HEADERS = (
-        "cf-connecting-ip", "cf-ray", "cf-visitor",
-        "x-forwarded-for", "x-forwarded-host", "x-real-ip", "forwarded",
-    )
-
-    def _is_trusted_loopback(request: Request) -> bool:
-        """True ONLY for a DIRECT loopback connection with no proxy/tunnel
-        forwarding headers. A bare ``client.host in ('127.0.0.1','::1')`` check is
-        unsafe behind a Cloudflare tunnel / reverse proxy: those connect from
-        loopback, so a remote visitor would otherwise inherit local trust and
-        slip past LOCALHOST_BYPASS or spoof the internal-tool path. Odysseus's own
-        in-process agent loopback calls carry none of these headers, so they still
-        qualify."""
-        host = request.client.host if request.client else None
-        if host not in ("127.0.0.1", "::1"):
-            return False
-        for _h in _PROXY_FWD_HEADERS:
-            if request.headers.get(_h):
-                return False
-        return True
-
     class AuthMiddleware(BaseHTTPMiddleware):
         async def dispatch(self, request: Request, call_next):
             path = request.url.path
@@ -374,7 +354,7 @@ if AUTH_ENABLED:
             try:
                 from core.middleware import INTERNAL_TOOL_HEADER, INTERNAL_TOOL_TOKEN as _ITT, INTERNAL_TOOL_USER
                 _hdr = request.headers.get(INTERNAL_TOOL_HEADER)
-                if _hdr and secrets.compare_digest(_hdr, _ITT) and _is_trusted_loopback(request):
+                if _hdr and secrets.compare_digest(_hdr, _ITT) and is_trusted_direct_loopback(request):
                     # Impersonation: when the agent's loopback call sets
                     # X-Odysseus-Owner, attribute the request to that user only
                     # if they exist. Authorization checks remain separate; this
@@ -391,10 +371,10 @@ if AUTH_ENABLED:
                 logger.warning("Internal tool auth header check failed", exc_info=_e)
             # Allow DIRECT localhost requests (internal service calls from
             # heartbeats etc.). Tunnel/proxy-forwarded requests are excluded by
-            # _is_trusted_loopback so LOCALHOST_BYPASS can't be abused over a
+            # is_trusted_direct_loopback so LOCALHOST_BYPASS can't be abused over a
             # Cloudflare tunnel / reverse proxy. Keep LOCALHOST_BYPASS=false for
             # network-exposed deployments regardless.
-            if LOCALHOST_BYPASS and _is_trusted_loopback(request):
+            if LOCALHOST_BYPASS and is_trusted_direct_loopback(request):
                 return await call_next(request)
             if not auth_manager.is_configured:
                 # No users yet — redirect to login for first-time setup
@@ -426,6 +406,12 @@ if AUTH_ENABLED:
                             matched_scopes = scopes or []
                             break
                     if matched_id:
+                        from src.api_token_policy import api_token_route_allowed
+                        if not api_token_route_allowed(path, matched_scopes):
+                            return JSONResponse(
+                                status_code=403,
+                                content={"error": "API token scope does not permit this route"},
+                            )
                         # Update last_used_at off the hot path. Doing it
                         # inline used to keep the request open across an
                         # extra commit; do it fire-and-forget instead.
@@ -506,28 +492,29 @@ app.mount("/static", _RevalidatingStatic(directory=STATIC_DIR), name="static")
 @app.get("/api/generated-image/{filename}")
 async def serve_generated_image(filename: str, request: Request):
     """Serve generated images from the data directory."""
+    from src.auth_helpers import require_user
+    from core.database import SessionLocal as _SL, GalleryImage as _GI
+
+    _user = require_user(request)
     img_path = resolve_generated_image_path(filename)
-    # SECURITY: filename is the only key, so anyone who knows / guesses a
-    # 12-hex content hash could pull another user's image bytes. Require
-    # auth and verify ownership via the gallery row (when one exists).
+    # SECURITY: the metadata row is the authorization record. Missing rows and
+    # lookup failures must fail closed; otherwise an orphaned file becomes
+    # public to anyone who learns its short filename.
+    _db = None
     try:
-        from src.auth_helpers import get_current_user
-        from core.database import SessionLocal as _SL, GalleryImage as _GI
-        _user = get_current_user(request)
-        if _user:
-            _db = _SL()
-            try:
-                _row = _db.query(_GI).filter(_GI.filename == filename).first()
-                # Generated-but-not-yet-imported images have no row → allow.
-                # Row exists with a different owner → 404 (don't confirm existence).
-                if _row is not None and _row.owner and _row.owner != _user:
-                    raise HTTPException(status_code=404, detail="Image not found")
-            finally:
-                _db.close()
-    except HTTPException:
-        raise
+        _db = _SL()
+        _row = _db.query(_GI).filter(_GI.filename == filename).first()
     except Exception as _e:
         logger.warning("Image ownership verification failed for %r", filename, exc_info=_e)
+        raise HTTPException(status_code=503, detail="Image authorization unavailable")
+    finally:
+        if _db is not None:
+            try:
+                _db.close()
+            except Exception:
+                logger.warning("Failed to close image authorization session", exc_info=True)
+    if _row is None or (_user and _row.owner and _row.owner != _user):
+        raise HTTPException(status_code=404, detail="Image not found")
     ext = filename.rsplit('.', 1)[-1].lower()
     mime = {
         "png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg",

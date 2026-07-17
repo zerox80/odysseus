@@ -599,6 +599,7 @@ async def execute_tool_block(
     progress_cb: Optional[Callable[[Dict], Awaitable[None]]] = None,
     workspace: Optional[str] = None,
     tool_policy: Optional[Any] = None,
+    principal_is_api_token: bool = False,
 ) -> Tuple[str, Dict]:
     """Execute a single tool block. Returns (description, result_dict).
 
@@ -615,6 +616,7 @@ async def execute_tool_block(
             owner=owner,
             progress_cb=progress_cb,
             tool_policy=tool_policy,
+            principal_is_api_token=principal_is_api_token,
         )
         return output
     finally:
@@ -628,6 +630,7 @@ async def _execute_tool_block_impl(
     owner: Optional[str] = None,
     progress_cb: Optional[Callable[[Dict], Awaitable[None]]] = None,
     tool_policy: Optional[Any] = None,
+    principal_is_api_token: bool = False,
 ) -> Tuple[str, Dict]:
     """Execute a single tool block. Returns (description, result_dict).
 
@@ -717,13 +720,15 @@ async def _execute_tool_block_impl(
         logger.warning("Tool policy blocked tool=%s", tool)
         return desc, result
 
-    if tool in _ADMIN_TOOLS and not _owner_is_admin(owner):
+    principal_is_admin = False if principal_is_api_token else _owner_is_admin(owner)
+
+    if tool in _ADMIN_TOOLS and not principal_is_admin:
         desc = f"{tool}: BLOCKED"
         result = {"error": f"Tool '{tool}' requires an admin user.", "exit_code": 1}
         logger.warning("Admin tool blocked for non-admin owner=%r tool=%s", owner, tool)
         return desc, result
 
-    if is_public_blocked_tool(tool) and not _owner_is_admin(owner):
+    if is_public_blocked_tool(tool) and not principal_is_admin:
         desc = f"{tool}: BLOCKED"
         result = {
             "error": (

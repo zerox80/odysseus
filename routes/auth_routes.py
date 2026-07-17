@@ -6,6 +6,7 @@ from typing import Optional
 import asyncio
 import logging
 import os
+import secrets
 
 import json
 import re
@@ -13,6 +14,7 @@ from pathlib import Path
 
 from core.atomic_io import atomic_write_json, atomic_write_text
 from core.auth import AuthManager, RESERVED_USERNAMES, SetAdminResult, TOKEN_TTL
+from core.middleware import is_trusted_direct_loopback
 from src.constants import DEEP_RESEARCH_DIR, MEMORY_FILE, PASSWORD_MIN_LENGTH, SKILLS_DIR
 from src.rate_limiter import RateLimiter
 from src.settings_scrub import scrub_settings
@@ -97,8 +99,21 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
 
     @router.post("/setup")
     async def first_run_setup(body: SetupRequest, request: Request):
-        """Create initial admin account. Only works if no accounts exist."""
-        if not _setup_limiter.check(request.client.host):
+        """Create the initial admin from direct loopback or with bootstrap proof."""
+        expected_setup_token = os.getenv("ODYSSEUS_SETUP_TOKEN", "").strip()
+        headers = getattr(request, "headers", None) or {}
+        supplied_setup_token = headers.get("X-Odysseus-Setup-Token", "").strip()
+        has_setup_token = bool(
+            expected_setup_token
+            and supplied_setup_token
+            and secrets.compare_digest(supplied_setup_token, expected_setup_token)
+        )
+        if not is_trusted_direct_loopback(request) and not has_setup_token:
+            raise HTTPException(403, "Initial setup requires direct loopback or a valid setup token")
+
+        client = getattr(request, "client", None)
+        client_host = getattr(client, "host", None) or "unknown"
+        if not _setup_limiter.check(client_host):
             raise HTTPException(429, "Too many requests — try again later")
         if auth_manager.is_configured:
             raise HTTPException(400, "Already configured")

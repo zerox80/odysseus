@@ -73,7 +73,12 @@ from fastapi import HTTPException  # noqa: E402
 import companion.pairing as P  # noqa: E402
 import companion.routes as R  # noqa: E402
 from companion.routes import mint_pairing_token, setup_companion_routes  # noqa: E402
-from core.middleware import require_admin  # noqa: E402
+from core.middleware import (  # noqa: E402
+    INTERNAL_TOOL_HEADER,
+    INTERNAL_TOOL_TOKEN,
+    INTERNAL_TOOL_USER,
+    require_admin,
+)
 
 
 # --- token minting: shown once, hashed at rest -----------------------------
@@ -133,10 +138,10 @@ def _admin_mgr(is_admin):
     return SimpleNamespace(is_admin=lambda u: is_admin, is_configured=True)
 
 
-def _req(current_user, *, api_token=False, is_admin=False):
+def _req(current_user, *, api_token=False, is_admin=False, headers=None):
     return SimpleNamespace(
         state=SimpleNamespace(current_user=current_user, api_token=api_token),
-        headers={},
+        headers=headers or {},
         app=SimpleNamespace(state=SimpleNamespace(auth_manager=_admin_mgr(is_admin))),
     )
 
@@ -160,6 +165,24 @@ def test_admin_user_passes_the_gate(monkeypatch):
     monkeypatch.setenv("AUTH_ENABLED", "true")
     # Should not raise.
     require_admin(_req("alice", is_admin=True))
+
+
+def test_raw_internal_header_cannot_bypass_admin_gate(monkeypatch):
+    monkeypatch.setenv("AUTH_ENABLED", "true")
+
+    with pytest.raises(HTTPException) as exc:
+        require_admin(_req(
+            None,
+            headers={INTERNAL_TOOL_HEADER: INTERNAL_TOOL_TOKEN},
+        ))
+
+    assert exc.value.status_code == 403
+
+
+def test_middleware_stamped_internal_identity_passes_admin_gate(monkeypatch):
+    monkeypatch.setenv("AUTH_ENABLED", "true")
+
+    require_admin(_req(INTERNAL_TOOL_USER))
 
 
 # --- CSRF: minting is POST, never GET --------------------------------------
