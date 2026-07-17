@@ -12,8 +12,22 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  discover-source-limit-failures:
+    name: Find source-limit failures
+    runs-on: ubuntu-latest
+    outputs:
+      check_name: ${{ steps.scan.outputs.check_name }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          persist-credentials: false
+      - id: scan
+        name: Build visible check name
+        run: python3 .github/scripts/check-code-limits.py --github-output >> "$GITHUB_OUTPUT"
+
   source-limits:
-    name: "Python/TypeScript/Rust: max 500 lines / 120 characters"
+    name: "${{ needs.discover-source-limit-failures.outputs.check_name }}"
+    needs: discover-source-limit-failures
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
