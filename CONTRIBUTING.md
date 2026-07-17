@@ -62,6 +62,14 @@ docker compose logs --tail=120 odysseus
 
 Mention what you ran in the pull request description. If you could not run a check, say so.
 
+### Source file size
+
+New Python, TypeScript, TSX, and Rust files must stay at or below 500 lines.
+The repository still contains older files above that limit, so CI applies the
+rule as a ratchet: those files may be edited and reduced, but they may not grow
+past their size at the start of the pull request or push. Prefer extracting a
+focused module when an oversized file needs new functionality.
+
 ## Pull Requests
 
 Good pull requests usually include:

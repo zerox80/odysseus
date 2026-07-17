@@ -1,4 +1,4 @@
-name: Python, TypeScript and Rust source limits
+name: Python, TypeScript and Rust file size
 
 on:
   push:
@@ -11,6 +11,9 @@ concurrency:
   group: source-limits-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  SOURCE_LIMIT_BASE_REF: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+
 jobs:
   discover-source-limit-failures:
     name: Find source-limit failures
@@ -21,9 +24,13 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
           persist-credentials: false
+          fetch-depth: 0
       - id: scan
         name: Build visible check name
-        run: python3 .github/scripts/check-code-limits.py --github-output >> "$GITHUB_OUTPUT"
+        run: >-
+          python3 .github/scripts/check-code-limits.py
+          --baseline-ref "$SOURCE_LIMIT_BASE_REF"
+          --github-output >> "$GITHUB_OUTPUT"
 
   source-limits:
     name: "${{ needs.discover-source-limit-failures.outputs.check_name }}"
@@ -33,5 +40,8 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
           persist-credentials: false
-      - name: Check Python, TypeScript and Rust files
-        run: python3 .github/scripts/check-code-limits.py
+          fetch-depth: 0
+      - name: Check Python, TypeScript and Rust file sizes
+        run: >-
+          python3 .github/scripts/check-code-limits.py
+          --baseline-ref "$SOURCE_LIMIT_BASE_REF"
