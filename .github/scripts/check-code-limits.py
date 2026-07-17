@@ -115,7 +115,11 @@ def main() -> int:
 
     if violations:
         for path, line_number, message in violations:
-            print(f"::error file={path.as_posix()},line={line_number}::{message}")
+            location = f"{path.as_posix()}:{line_number}"
+            print(
+                f"::error file={path.as_posix()},line={line_number}::"
+                f"{location}: {message}"
+            )
         print(f"FAILED: {len(violations)} Python/TypeScript/Rust source-limit violation(s).")
     else:
         print(
