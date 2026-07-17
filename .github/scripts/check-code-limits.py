@@ -1,4 +1,4 @@
-"""Check line-count and line-length limits for tracked TypeScript and Rust files."""
+"""Check line-count and line-length limits for tracked Python, TypeScript, and Rust files."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ MAX_LINE_LENGTH = 120
 
 def tracked_source_files() -> list[Path]:
     result = subprocess.run(
-        ["git", "ls-files", "-z", "--", "*.ts", "*.tsx", "*.rs"],
+        ["git", "ls-files", "-z", "--", "*.py", "*.ts", "*.tsx", "*.rs"],
         check=True,
         capture_output=True,
     )
@@ -27,14 +27,14 @@ def report_summary(violations: list[tuple[Path, int, str]]) -> None:
         return
 
     with open(summary_path, "a", encoding="utf-8") as summary:
-        summary.write("## TypeScript/Rust source limits\n\n")
+        summary.write("## Python/TypeScript/Rust source limits\n\n")
         if violations:
             summary.write("❌ The following limits failed:\n\n")
             for path, line_number, message in violations:
                 summary.write(f"- `{path}:{line_number}` — {message}\n")
         else:
             summary.write(
-                f"✅ All tracked TypeScript and Rust files are at most "
+                f"✅ All tracked Python, TypeScript, and Rust files are at most "
                 f"{MAX_LINES} lines, with no line longer than "
                 f"{MAX_LINE_LENGTH} characters.\n"
             )
@@ -73,10 +73,10 @@ def main() -> int:
     if violations:
         for path, line_number, message in violations:
             print(f"::error file={path.as_posix()},line={line_number}::{message}")
-        print(f"FAILED: {len(violations)} TypeScript/Rust source-limit violation(s).")
+        print(f"FAILED: {len(violations)} Python/TypeScript/Rust source-limit violation(s).")
     else:
         print(
-            f"PASSED: all tracked TypeScript/Rust files satisfy the "
+            f"PASSED: all tracked Python/TypeScript/Rust files satisfy the "
             f"{MAX_LINES}-line and {MAX_LINE_LENGTH}-character limits."
         )
 
